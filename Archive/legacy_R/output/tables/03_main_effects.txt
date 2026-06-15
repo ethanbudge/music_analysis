@@ -1,0 +1,12 @@
+        part             term statistic     MuLan      CLAP MERT+SBERT  Combined
+1  estimates      (Intercept)  estimate 63.879*** 63.879***  63.879*** 63.879***
+2  estimates      (Intercept) std.error   (1.356)   (1.353)    (1.355)   (1.356)
+3  estimates      lmc_mulan_c  estimate     0.844                          1.170
+4  estimates      lmc_mulan_c std.error   (1.360)                        (1.379)
+5  estimates       lmc_clap_c  estimate              -1.506               -1.551
+6  estimates       lmc_clap_c std.error             (1.357)              (1.380)
+7  estimates lmc_mert_sbert_c  estimate                          1.103     1.057
+8  estimates lmc_mert_sbert_c std.error                        (1.359)   (1.374)
+9        gof         Num.Obs.                 173       173        173       173
+10       gof               R2               0.002     0.007      0.004     0.014
+11       gof          R2 Adj.              -0.004     0.001     -0.002    -0.003

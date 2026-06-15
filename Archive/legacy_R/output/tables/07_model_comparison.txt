@@ -1,0 +1,6 @@
+# A tibble: 3 × 5
+  Model              AIC   Beta LOAO_CV_R2 Joint_Training
+  <chr>            <dbl>  <dbl>      <dbl> <chr>         
+1 MuQ-MuLan        1343.  0.742     -0.137 Yes           
+2 LAION-CLAP-Music 1341. -1.42      -0.132 Yes           
+3 MERT+SBERT       1342. -1.16      -0.150 No (Baseline) 

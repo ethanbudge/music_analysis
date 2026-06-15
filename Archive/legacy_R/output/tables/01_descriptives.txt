@@ -1,0 +1,14 @@
+# A tibble: 11 × 9
+   variable           n    mean     sd     min    p25    med    p75      max
+   <chr>          <dbl>   <dbl>  <dbl>   <dbl>  <dbl>  <dbl>  <dbl>    <dbl>
+ 1 popularity       173  63.9   17.8    10     52     68     78       92    
+ 2 lmc_mulan        173   0.32   0.099   0.011  0.244  0.32   0.38     0.579
+ 3 lmc_clap         173   0.089  0.102  -0.169  0.026  0.089  0.159    0.426
+ 4 lmc_mert_sbert   173  -0.029  0.031  -0.119 -0.049 -0.03  -0.009    0.051
+ 5 tempo              0 NaN     NA     Inf     NA     NA     NA     -Inf    
+ 6 danceability       0 NaN     NA     Inf     NA     NA     NA     -Inf    
+ 7 energy             0 NaN     NA     Inf     NA     NA     NA     -Inf    
+ 8 valence            0 NaN     NA     Inf     NA     NA     NA     -Inf    
+ 9 acousticness       0 NaN     NA     Inf     NA     NA     NA     -Inf    
+10 speechiness        0 NaN     NA     Inf     NA     NA     NA     -Inf    
+11 duration_min     173   4.23   1.22    2.13   3.43   3.88   4.74    10.2  

@@ -1,0 +1,72 @@
+# ─── Dense / non-redistributable data (never push) ───────────────────────────
+# LRCLIB dump (100+ GB), downloaded audio, cached embeddings, project DB.
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.mp3
+*.wav
+*.flac
+*.npz
+*.npy
+
+# Lyrics (copyright) — never redistribute raw lyric text.
+lyrics/
+**/lyrics/
+
+# ─── Generated results (regenerable; large CSVs/figures excluded by default) ──
+results/*.csv
+results/**/*.json
+analysis/output/
+stan/output/
+
+# ─── Reports / rendered artifacts ─────────────────────────────────────────────
+*.html
+*_cache/
+*_files/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.virtual_documents/
+.venv/
+venv/
+*.egg-info/
+
+# ─── R ──────────────────────────────────────────────────────────────────────
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.cache
+
+# ─── Stan compiled binaries ───────────────────────────────────────────────────
+stan/*.exe
+stan/model_track
+stan/model_segment
+stan/model_timeline
+*.stanc
+
+# ─── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code local settings
+.claude/
+
+# ─── Legacy Stan run artifacts (regenerable MCMC draws / fits / binaries) ─────
+*.rds
+Archive/legacy_models/bayes/output/
+Archive/legacy_models/bayes/output_archive/
+Archive/legacy_models/bayes/model_track
+Archive/legacy_models/bayes/model_segment
+Archive/legacy_models/bayes/model_timeline
+Archive/legacy_models/bayes/model_track_v2
+Archive/legacy_models/bayes/model_segment_v2
+Archive/legacy_models/bayes/model_timeline_v2
+Archive/legacy_models/bayes/archive/model_track
+Archive/legacy_models/bayes/archive/model_segment
+Archive/legacy_models/bayes/archive/model_timeline
+Archive/legacy_models/bayes/archive/musical_congruence_model_simple

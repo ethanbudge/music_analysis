@@ -1,0 +1,1312 @@
+---
+title: "Lyric–Music Congruence and Song Popularity"
+subtitle: "A Working Paper on the Cross-Modal Drivers of Streaming Engagement"
+author:
+  - name: Ethan Budge
+    affiliation: |
+      Ph.D. Student, Department of Marketing and Logistics  
+      Fisher College of Business, The Ohio State University
+    email: budge.13@osu.edu
+date: today
+abstract: |
+  This working paper introduces *lyric–music congruence* (LMC) — the
+  cosine similarity between audio and lyric embeddings in a
+  jointly-trained affective space — as a candidate driver of song
+  popularity on streaming platforms. Drawing on processing fluency
+  theory,narrative transportation, and the current research on joint 
+  embedding spaces, I hypothesize that LMC raises Spotify popularity, 
+  with stronger effects for narrative-forward
+  artists. I report preliminary Bayesian estimates from four
+  hierarchical specifications fit to a corpus of 359 songs across 34
+  artists and four genre clusters. The population-level LMC effect is
+  statistically inconclusive at the current sample, with 90% credible
+  intervals straddling zero in every specification. Three structural
+  features of LMC carry directional but sub-decisive signal in the
+  predicted direction: chorus congruence outweighs verse congruence
+  (P[Δ > 0] = 0.64), within-song consistency of LMC modestly predicts
+  higher popularity (P[β < 0] = 0.96), and the orientation moderation
+  is positive in the trajectory model (P[γ > 0] = 0.75). The
+  segment-level model provides the best out-of-sample fit. I treat
+  these findings as a first pass that has established the measurement
+  pipeline, identified design choices, and quantified the data and
+  identification challenges that remain. The pipeline generalizes to
+  other multimodal marketing contexts including advertising
+  music–visual alignment and brand narrative coherence.
+keywords:
+  - multimodal emotion recognition
+  - lyric–music congruence
+  - music marketing
+  - processing fluency
+  - narrative transportation
+  - streaming popularity
+  - contrastive learning
+  - audio–text embeddings
+format:
+  pdf:
+    documentclass: article
+    classoption:
+      - 11pt
+    geometry:
+      - margin=1in
+    fig-pos: "H"
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    keep-tex: false
+    include-in-header:
+      text: |
+        \usepackage{setspace}
+        \doublespacing
+        \usepackage{booktabs}
+        \usepackage{amsmath}
+        \usepackage{amssymb}
+        \usepackage{mathtools}
+        \usepackage{microtype}
+        \setlength{\parindent}{0.4in}
+number-sections: true
+toc: false
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup}
+#| include: false
+
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(loo)
+library(tidyverse)
+library(patchwork)
+library(ggdist)
+library(scales)
+library(here)
+library(knitr)
+library(kableExtra)
+
+BAYES_DIR  <- here::here("bayes")
+OUTPUT_DIR <- file.path(BAYES_DIR, "output")
+
+theme_set(
+  theme_minimal(base_size = 11) +
+    theme(plot.title      = element_text(face = "bold", size = 12),
+          plot.subtitle   = element_text(color = "grey40"),
+          legend.position = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.text       = element_text(face = "bold"))
+)
+
+ORIENT_COLS <- c("narrative" = "#2A9D8F", "production" = "#E76F51")
+GENRE_COLS  <- c("Hip-Hop" = "#E63946", "Folk/Country" = "#2A9D8F",
+                 "Pop" = "#457B9D", "Electronic" = "#9B2335")
+
+zsc <- function(x) as.numeric(scale(x))
+boundary_adjust <- function(y01, N) (y01 * (N - 1) + 0.5) / N
+```
+
+# Introduction
+
+A song can communicate emotions and ideas through both its acoustic properties
+and its lyrical content. Listeners experience both at once, and the
+relationship between the two is itself a source of meaning, pleasure,
+or dissonance. Yet quantitative marketing research has largely
+treated the audio and lyrical dimensions of music as separate objects
+of study. This paper proposes and begins to empirically test a
+unified measure of *lyric–music congruence* (LMC) — the degree to
+which a song's acoustic emotional signal and its lyrical emotional
+signal occupy similar regions of a shared affective embedding space —
+and examines its consequences for commercial success on streaming
+platforms.
+
+The impetus is threefold. First, the economic stakes are high. Global
+recorded music revenues reached \$28.6 billion in 2023, with
+streaming accounting for over 67% of that total (IFPI 2024); on
+Spotify alone, more than 100,000 tracks are uploaded daily, creating
+an attention economy in which fine-grained design differences carry
+outsized commercial consequences. Second, recent advances in
+multimodal machine learning — contrastive representation learning in
+the tradition of CLIP (Radford et al. 2021), the audio–text model
+CLAP (Wu et al. 2023), and Google's music–language joint embedding
+MuLan (Huang et al. 2022) — now make it feasible to encode raw audio
+and natural-language lyrics into a shared latent space, enabling a
+model-agnostic measure of emotional alignment that requires no a
+priori commitment to a discrete emotion taxonomy. Third, although both audio and lyrics have been extensively studied from psychological and qualitative perspectives (SOURCE), the cross-modal relationship between them has not been quantitatively operationalized or linked to consumer behavior at scale before.
+
+This paper makes three intended contributions. **Methodologically**,
+I introduce LMC as a construct and develop a pipeline for computing
+it at scale using pre-trained audio and lyric encoders embedded in a
+contrastively-aligned joint space; the pipeline generalizes to other
+multimodal marketing contexts. **Empirically**, I estimate the
+effect of LMC on Spotify's recency-weighted popularity score using
+four Bayesian hierarchical specifications that vary in temporal
+granularity. **Theoretically**, I hypothesize heterogeneity in the
+mechanisms linking LMC to popularity: narrative-forward songs are
+predicted to operate primarily through transportation, and
+production-forward songs through fluency. This is a substantial potential finding in and of itself while also opening routes for future quantitative research on abstract psychological mechanisms.
+
+As the work currently stands, the
+pipeline is built and operational, but the empirical analysis is at
+an early stage. My corpus of 359 songs across 34 artists yields
+adequate computational diagnostics but is not large enough to deliver
+decisive evidence. The population-level LMC coefficient in my
+preferred specification has a posterior median of $0.006$ on the
+logit scale with a 90% credible interval of $[-0.131, 0.131]$,
+leaving its sign and magnitude effectively undetermined. However, as a current state of progress, I report what the data suggest at directional,
+sub-decisive levels: chorus-level LMC outperforms verse-level LMC,
+within-song consistency predicts higher popularity, and the
+moderation by orientation is in the predicted direction in the
+trajectory model. These signals motivate the next phase, laid out at
+the end of the paper.
+
+The paper proceeds as follows. Section \ref{literature-review}
+reviews the relevant literature. Section
+\ref{conceptual-framework-and-hypotheses} develops the conceptual
+framework and states formal hypotheses. Section
+\ref{data-and-measurement} describes the data and embedding pipeline.
+Section \ref{empirical-strategy} presents the hierarchical Bayesian
+specification. Section \ref{results} reports results. Section
+\ref{discussion} discusses what the current evidence does and does
+not allow us to conclude. Section
+\ref{limitations-and-the-path-forward} lays out the path forward.
+
+# Literature Review
+
+## Emotion in Music: Psychoacoustic Foundations and Consumer Response
+
+A foundational distinction in the music psychology literature is
+between *perceived* emotion — what a listener recognizes as the
+emotional character of a piece — and *induced* emotion — what the
+listener actually experiences (Eerola and Vuoskoski 2011; Gabrielsson
+2002). Eerola and Vuoskoski (2011) compared seven major emotion models
+applied to identical stimuli and found that no single framework —
+discrete, dimensional, or prototype-based — provided uniformly
+superior classification accuracy, motivating taxonomy-free approaches
+to emotional representation.
+
+In the consumer behavior literature, cross-domain alignment of music
+with consumption environments has been shown to matter. North,
+Hargreaves, and McKendrick (1999) showed in a wine shop field
+experiment that nationally congruent background music influenced
+product choice; Areni and Kim (1993) showed that classical versus
+Top-40 background music shifted consumers toward higher-priced wine
+selections; and MacInnis and Park (1991) distinguished between the
+"fit" of music to ad content and music's arousal properties as
+independent predictors of ad attitude. These studies established
+cross-modal coherence as a consumer driver but predated the
+computational tools needed to measure it at scale.
+
+## Computational Music Emotion Recognition
+
+Computational music emotion recognition has progressed from the previous standard of 
+hand-crafted acoustic features mapped onto dimensional emotion models, inferring emotions from features such as tempo, mode, spectral centroid, and MFCCs (Yang and Chen 2012). Panda,
+Malheiro, and Paiva (2023) document that arousal is substantially
+easier to predict from audio than valence. A central limitation is
+dependence on predefined emotion taxonomies that may not correspond
+to the continuous, high-dimensional nature of musical emotion. Fong,
+Kumar, and Sudhir (2024) recently developed a theory-based explainable
+CNN whose harmonics-grounded filters achieve competitive prediction
+while preserving interpretability — demonstrating that audio
+embeddings carrying emotional information can be extracted in ways
+tractable for marketing-style downstream models. A separate strand
+has built jointly-trained audio–text models: MuLan (Huang et al.
+2022) over 44 million music recordings paired with playlist
+annotations, and LAION-CLAP (Wu et al. 2023) over a general-purpose
+caption corpus. These models do not require predefined emotion
+labels; the alignment of audio and text within their learned spaces
+becomes itself a measurable quantity, and this is what makes a
+continuous, scale-free measure of LMC feasible.
+
+## Processing Fluency and Aesthetic Preference
+
+A robust finding across the cognitive and consumer literatures is that
+stimuli which are easier to process are evaluated more favorably
+(Reber, Schwarz, and Winkielman 2004; Winkielman et al. 2006).
+Processing fluency generates affect that is misattributed to the
+stimulus, producing aesthetic preference. Landwehr, Labroo, and
+Herrmann (2011) showed that design fluency measures improve automobile
+sales forecasts, and Hekkert (2006) integrated fluency into a broader
+inverted-U model of design aesthetics. Cross-modally, when two
+channels convey congruent information, the listener does not have to
+reconcile competing representations and fluency is enhanced (Lee and
+Labroo 2004). A song whose musical affect aligns with its lyrical
+affect imposes lower processing demands than one whose channels
+diverge, and should therefore be preferred. Melvill-Smith, Krause, and
+North (2023) applied processing fluency directly to lyrics, finding
+that lyric simplicity — operationalized through readability and
+repetitiveness — predicted UK chart success between 1999 and 2013.
+Their analysis is confined to the lyric channel alone and does not
+consider whether the alignment of lyric and musical affect constitutes
+an independent driver of popularity.
+
+## Narrative Transportation and Lyrical Engagement
+
+For songs in which lyrical content functions narratively — inviting
+the listener to follow a story, inhabit a perspective, or trace an
+emotional arc — a distinct mechanism may operate. Green and Brock
+(2000) define *transportation* as a state of absorption in a narrative
+in which cognitive and affective resources are directed toward the
+story world. Transported listeners show stronger affective response,
+more vivid imagery, and stronger belief change; transportation is
+disrupted by "false notes" — narrative incoherence or affective
+mismatch — that break immersion. Van Laer et al. (2014) meta-analyzed
+76 studies and documented significant effects on persuasion and
+attitude change. In advertising, Phillips and McQuarrie (2010) found
+that emotionally congruent visual–verbal combinations produced
+stronger narrative engagement and more favorable brand attitudes than
+incongruent ones — a paradigm structurally parallel to music–lyric
+relations. The music constitutes the affective "world" into which the
+listener is invited; the lyrics are the narrative that unfolds within
+it. When emotional character and emotional register align,
+transportation is facilitated. When they diverge, the listener faces
+what I term *affective narrative friction*.
+
+The transportation account generates predictions distinct from
+fluency and implies a moderating role for lyrical orientation. For
+narrative-forward songs, congruence operates by sustaining immersion;
+for production-forward songs, through cognitive ease. Both pathways
+predict a positive LMC effect, but they differ in *who benefits most*.
+
+## Music Marketing and Streaming Popularity
+
+The marketing literature on music popularity has historically focused
+on chart outcomes and acoustic features. Salganik, Dodds, and Watts
+(2006) demonstrated experimentally that musical success is far more
+unpredictable than fundamentals alone would suggest, with social
+influence amplifying small initial differences. Askin and Mauskapf
+(2017) found an inverted-U between acoustic typicality and Billboard
+chart position, implying that the relationship between any coherence
+measure and popularity may itself be non-linear. Ordanini, Nunes, and
+Nanni (2018) found that genre-distant collaborations achieved greater
+chart success, consistent with the co-branding literature.
+
+We adopt Spotify's proprietary popularity score — a platform-computed
+index from 0 to 100 reflecting stream volume and recency, with recent
+activity weighted more heavily (Spotify AB 2024). The recency
+weighting rewards sustained engagement over promotional spikes. We
+note that streaming popularity is a coarse outcome variable, not
+separately identifying discovery, retention, repeat listening, or
+skip behavior — each of which would be more diagnostic of the
+mechanisms LMC is hypothesized to engage. Ideally, this program would
+obtain listener-level behavioral data through a partnership with
+Spotify, Apple Music, or another platform. Such a partnership has
+not yet materialized; in its absence I proceed with the
+publicly-available popularity index scraped via the Spotify Web API,
+flagging this as a substantive limitation I aim to address.
+
+## Genre Heterogeneity and the Production–Narrative Spectrum
+
+Genre represents not only musical conventions but distinct listener
+populations and the functional role of lyrics relative to
+instrumentation (Lena and Peterson 2008). In hip-hop and country,
+lyrical craft and narrative authenticity carry high cultural value;
+in EDM and mainstream pop, minimal or textural lyrics are frequently
+subordinated to sonic production. The emotional significance of any
+mismatch between lyrical and musical channels therefore varies
+systematically across genre contexts. The "text as data" literature
+in marketing has demonstrated that high-dimensional text
+representations contain commercially relevant signals poorly
+approximated by hand-coded categories (Berger et al. 2020), with
+Toubia et al. (2019) using embedding-derived ideation diversity to
+predict new product performance and Dew and Ansari (2018) applying
+Bayesian nonparametric models to music preference heterogeneity.
+
+Most prior music emotion recognition work has treated audio and
+lyrics as parallel channels to be fused for prediction of a common
+emotion label, rather than as channels whose mutual alignment might
+itself have behavioral consequences. The music marketing literature
+has studied acoustic features and chart outcomes, or lyrical
+complexity and popularity, but not the cross-modal relationship
+between them. This intersection is the gap this research is designed
+to fill.
+
+# Conceptual Framework and Hypotheses
+
+The assumed data-generating process can be summarized as follows. Three
+upstream factors — artist identity, genre, and lyric orientation —
+jointly shape both the song's audio features and its lyrical content.
+The resulting song produces an audio recording and a lyric stream
+whose joint embedding gives rise to the LMC measure that is the focus
+of inference. Popularity is downstream of LMC and a set of unobserved
+platform, advertising, and social distribution forces; the path from
+LMC to popularity is identified up to bias from these forces, and we
+return to the implications in Section \ref{discussion}. A diagrammatic
+version of this DAG appears in the companion presentation.
+
+The construct of central interest is *lyric–music congruence*, defined
+as the cosine similarity between a song's audio embedding and its
+lyric embedding in a jointly-trained high-dimensional space. We
+operationalize LMC at four levels of granularity and treat orientation
+as a binary classification of artist into *narrative-forward* versus
+*production-forward* based on genre conventions. Four formal
+hypotheses follow.
+
+**Hypothesis 1 (Main effect).** *Holding artist, genre, song age, and
+audio mood fixed, higher LMC predicts higher Spotify popularity.*
+Both fluency and transportation predict a positive coefficient; the
+two accounts differ on mechanism, not direction.
+
+**Hypothesis 2 (Orientation moderation).** *The positive effect of LMC
+on popularity is stronger for narrative-forward artists than for
+production-forward artists.* This follows from transportation: when
+lyrics carry the cognitive and affective load, congruence with the
+musical world has more to disrupt or sustain.
+
+**Hypothesis 3a (Chorus over verse).** *Chorus-level LMC has a larger
+positive effect on popularity than verse-level LMC.* Choruses are
+repeated, hooked, and disproportionately recalled.
+
+**Hypothesis 3b (Within-song consistency).** *Songs with greater
+within-song consistency of LMC — low standard deviation of segment-level
+LMC — have higher popularity, all else equal.* Inconsistent congruence
+creates moments of disrupted fluency or narrative friction.
+
+**Hypothesis 4 (Trajectory shape).** *Beyond mean LMC, the dynamics of
+LMC over a song carry incremental signal: positive slope and modest
+mid-song peaks (positive curvature) predict higher popularity.* This
+hypothesis is exploratory.
+
+# Data and Measurement
+
+## Sampling Frame
+
+The current corpus consists of 34 artists distributed across four
+genre clusters: hip-hop (10 artists), folk/Americana/country (9
+artists), pop (8 artists), and electronic (7 artists). The first two
+clusters are operationalized as *narrative-forward*, the second two
+as *production-forward*, following the literature on genre conventions
+in lyrical function (Lena and Peterson 2008). Within each artist, we
+collected approximately 10–15 representative tracks spanning the
+discography, biased toward songs with meaningful streaming history.
+We sampled 441 candidate songs; due to incomplete pairings of audio
+with lyrics, the analytic corpus retained for the track-level models
+is 359 songs. The subset retained for the segment model (M3) is 324
+songs; the subset for the line-by-line trajectory model (M4) is 114
+songs. Sparsity in the higher-granularity models reflects the
+difficulty of automatically matching lyric segments to audio
+timestamps for a portion of the corpus.
+
+We acknowledge that this is not a probability sample of all music on
+streaming platforms. Artists were purposively selected to cover the
+four-cluster design, and within-artist song selection biases toward
+better-known tracks. The corpus therefore over-represents
+already-popular songs. Estimates of LMC slopes should be interpreted
+within the realized sample; the population to which they generalize
+is *commercially active artists in the four sampled genre clusters*,
+not music on Spotify in general. Section
+\ref{limitations-and-the-path-forward} describes the systematic
+sampling extension I plan.
+
+## Pipeline
+
+The data pipeline consists of five stages. (1) **Lyric scraping**
+queries Genius via the LyricsGenius API and persists raw lyric text
+plus structural section headers (`[Verse 1]`, `[Chorus]`, etc.).
+(2) **Audio acquisition** retrieves audio for each song via `yt-dlp`
+and converts to WAV at the sample rate required by each downstream
+encoder. (3) **Schema construction** validates the cross-product of
+audio and lyric availability into a unified catalog. (4) **Embedding**
+runs each of three encoder configurations (described below) over the
+full corpus. (5) **Segment analysis** uses WhisperX (Bain et al. 2023)
+for forced alignment of lyric lines to audio timestamps, falling back
+to equal-duration splits when alignment confidence is insufficient.
+Spotify popularity scores, release dates, and Essentia mood controls
+are joined at the song level for the analytic file.
+
+## Embedding Models
+
+We compute LMC under three encoder configurations to characterize
+sensitivity of results to embedding choice.
+
+**MuQ-MuLan** (Huang et al. 2022) is a music–language joint embedding
+model trained on 44 million music recordings paired with playlist
+tags. Audio is embedded at 24 kHz and lyrics as a single text input;
+both vectors live in the same 512-dimensional space, making cosine
+similarity directly interpretable as semantic alignment. This is the
+primary encoder for my analyses.
+
+**LAION-CLAP-Music** (Wu et al. 2023) is a contrastive language–audio
+pretraining model with broader training data (630K audio–caption
+pairs spanning music, environmental sounds, and AudioSet). Its audio
+representations carry stronger perceptual and timbral information
+relative to MuLan's tag-driven training. Comparing CLAP- and
+MuLan-derived LMC tests robustness to encoder choice.
+
+## LMC Operationalizations
+
+We construct four operationalizations giving rise to the four models
+in Section \ref{empirical-strategy}.
+
+**Track-level LMC** is the cosine similarity between the full-track
+audio and full-lyric embeddings — computationally efficient but blind
+to internal structure. I compute this under both MuLan (M1) and
+CLAP (M2).
+
+**Segment-level LMC** decomposes each song into chorus and verse
+segments using the structural headers preserved during scraping. The
+corresponding audio interval is identified via WhisperX forced
+alignment, embedded separately, and cosine similarity to the segment
+lyric embedding is computed. I aggregate to song-level summaries:
+mean chorus LMC, mean verse LMC, and within-song standard deviation
+(a consistency measure). This is the input to M3.
+
+**Line-level LMC** decomposes each song line by line, computing LMC
+for each lyric line against its temporally-aligned audio interval.
+From the time series I extract four trajectory features — mean,
+slope, curvature, and early-to-late change — plus the standard
+deviation. This is the input to M4. The line-level model has the
+smallest analytic sample (N = 114) because line-by-line forced
+alignment fails for a large share of the corpus.
+
+## Outcome and Controls
+
+Spotify popularity is retrieved via the Spotify Web API; the score is
+bounded $[0, 100]$, and I rescale to the open unit interval $(0, 1)$
+via boundary adjustment $y' = (y(N-1) + 0.5)/N$ (Smithson and
+Verkuilen 2006). *Song age* (years since release) absorbs the
+mechanical penalty Spotify's recency weighting imposes on older songs.
+A vector of seven *Essentia-derived mood controls* (happy, sad,
+relaxed, aggressive, party, danceability, voice/instrumental balance)
+from pretrained classifiers (Bogdanov et al. 2013) is z-standardized
+and entered into the linear predictor; these absorb variation in the
+audio's affective character independent of its lyric alignment, so
+the LMC coefficient identifies cross-modal alignment rather than
+overall mood. Unobserved drivers — promotional intensity, playlist
+placement, social media virality, listener demographics — remain in
+the error term; I take up the implications in Section
+\ref{discussion}.
+
+# Empirical Strategy
+
+```{r load-data}
+#| include: false
+
+master_path <- here::here("results", "master_results.csv")
+
+if (file.exists(master_path)) {
+  master <- read_csv(master_path, show_col_types = FALSE) %>%
+    mutate(
+      release_year = as.numeric(substr(release_date, 1, 4)),
+      song_age     = 2025 - release_year,
+      genre_cluster = case_when(
+        genre %in% c("hip-hop")                              ~ "Hip-Hop",
+        genre %in% c("folk", "folk-rock", "country")         ~ "Folk/Country",
+        genre %in% c("pop")                                  ~ "Pop",
+        genre %in% c("electronic", "psychedelic-electronic") ~ "Electronic",
+        TRUE                                                 ~ "Other"
+      ),
+      orientation = factor(orientation, levels = c("production", "narrative"))
+    )
+
+  mood_path <- here::here("results", "essentia_mood.csv")
+  if (file.exists(mood_path)) {
+    mood <- read_csv(mood_path, show_col_types = FALSE) %>%
+      select(song_id, mood_happy, mood_sad, mood_relaxed,
+             mood_aggressive, mood_party, danceability, voice_instrumental)
+    master <- master %>% left_join(mood, by = "song_id")
+  }
+} else {
+  master <- NULL
+}
+```
+
+```{r load-fits}
+#| include: false
+
+safe_read <- function(p) tryCatch(readRDS(p), error = function(e) NULL)
+
+fit_m1 <- safe_read(file.path(OUTPUT_DIR, "fit_M1_mulan_track.rds"))
+fit_m2 <- safe_read(file.path(OUTPUT_DIR, "fit_M2_clap_track.rds"))
+fit_m3 <- safe_read(file.path(OUTPUT_DIR, "fit_M3_segment.rds"))
+fit_m4 <- safe_read(file.path(OUTPUT_DIR, "fit_M4_timeline.rds"))
+
+models <- list(
+  "M1: MuLan Track"  = fit_m1,
+  "M2: CLAP Track"   = fit_m2,
+  "M3: Segment"      = fit_m3,
+  "M4: Timeline"     = fit_m4
+) %>% compact()
+```
+
+## Beta Regression with Hierarchical Partial Pooling
+
+All four models share a common likelihood. Let $y_i \in (0, 1)$ denote
+the boundary-adjusted Spotify popularity for song $i$. I assume
+
+$$
+y_i \sim \text{Beta}(\mu_i \cdot \phi,\; (1 - \mu_i) \cdot \phi),
+$$
+
+\noindent where $\phi > 0$ is a precision parameter and the mean is
+linked to the linear predictor by $\text{logit}(\mu_i) = \eta_i$. Beta
+regression is natural given bounded outcome support (Ferrari and
+Cribari-Neto 2004).
+
+The linear predictor incorporates partial pooling at two levels.
+Artists are nested within four genre clusters; I estimate random
+intercepts at both levels. The artist intercept uses a non-centered
+parameterization to improve sampling geometry:
+
+$$
+\alpha_{\text{artist}[j]} = \mu_0 + \gamma_{\text{int}} \cdot \text{orient}_j + \sigma_{\text{artist}} \cdot z_j, \quad z_j \sim \mathcal{N}(0, 1),
+$$
+
+\noindent where $\mu_0$ is the grand mean and $\gamma_{\text{int}}$ a
+fixed orientation shift. Genre intercepts are
+$\alpha_{\text{genre}[g]} \sim \mathcal{N}(0, \sigma_{\text{genre}})$.
+We allow the LMC slope to vary by genre:
+
+$$
+\beta_{\text{lmc, genre}[g]} = \beta_{\text{lmc}} + \sigma_{\text{lmc, genre}} \cdot z_g, \quad z_g \sim \mathcal{N}(0, 1).
+$$
+
+\noindent The posterior on $\sigma_{\text{lmc, genre}}$ tests for
+heterogeneity in LMC sensitivity across genres. With only four genres,
+partial pooling shrinks aggressive estimates toward the population
+mean. All models include song age and seven mood controls, denoted
+collectively $\mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}$.
+
+## The Four Models
+
+**Model M1 (MuLan track-level)**:
+
+$$
+\eta_i^{M1} = \alpha_{\text{artist}[j]} + \alpha_{\text{genre}[g]} + (\beta_{\text{lmc, genre}[g]} + \gamma_{\text{lmc}} \cdot \text{orient}_j) \cdot \text{LMC}_{z, i}^{\text{MuLan}} + \mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}
+$$
+
+\noindent The orientation shift $\gamma_{\text{lmc}}$ tests Hypothesis 2:
+$\gamma_{\text{lmc}} > 0$ implies narrative-forward artists benefit
+more from LMC than production-forward artists.
+
+**Model M2 (CLAP track-level)** is identical to M1 with $\text{LMC}^{\text{CLAP}}$
+in place of $\text{LMC}^{\text{MuLan}}$. Comparing M1 and M2
+characterizes encoder sensitivity.
+
+**Model M3 (segment)** decomposes track LMC into chorus and verse
+components and adds a within-song consistency term:
+
+$$
+\eta_i^{M3} = \alpha_{\text{artist}[j]} + \alpha_{\text{genre}[g]} + (\beta_{\text{chorus, genre}[g]} + \gamma_{\text{chorus}} \cdot \text{orient}_j) \cdot \text{chorus}_{z, i} + \beta_{\text{verse}} \cdot \text{verse}_{z, i} + \beta_{\text{sd}} \cdot \text{sd}_{z, i} + \mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}
+$$
+
+\noindent The contrast $\Delta = \beta_{\text{chorus}} -
+\beta_{\text{verse}}$ tests Hypothesis 3a; $\beta_{\text{sd}}$ tests
+Hypothesis 3b.
+
+**Model M4 (trajectory)** uses the line-by-line LMC time series and
+extracts four trajectory features in addition to mean LMC:
+
+$$
+\eta_i^{M4} = \alpha_{\text{artist}[j]} + \alpha_{\text{genre}[g]} + \beta_{\text{lmc}[j]} \cdot \overline{\text{LMC}}_{z, i} + \beta_{\text{slope}} \cdot \text{slope}_{z, i} + \beta_{\text{curve}} \cdot \text{curve}_{z, i} + \beta_{\text{change}} \cdot \text{change}_{z, i} + \beta_{\text{sd}} \cdot \text{sd}_{z, i} + \mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}
+$$
+
+\noindent where $\beta_{\text{lmc}[j]}$ follows a three-level hierarchy
+(population $\to$ genre $\to$ artist) and artist-level deviations come
+from a bivariate non-centered parameterization on intercept and LMC
+slope with LKJ-prior correlation:
+
+$$
+\begin{pmatrix} \text{artist\_re}_{\text{int}[j]} \\ \text{artist\_re}_{\text{lmc}[j]} \end{pmatrix} = \text{diag}(\boldsymbol{\sigma}_{\text{artist}}) \cdot \mathbf{L} \cdot \mathbf{z}_j.
+$$
+
+## Priors
+
+We use weakly informative priors throughout, summarized in Table
+\ref{tab:priors}. The grand mean $\mu_0$ has a diffuse prior on the
+logit scale; slope parameters have $\mathcal{N}(0, 0.5)$ priors,
+implying a one-unit logit-scale shift is plausible but not preferred.
+Variance components use half-normal priors. The LKJ(2) prior mildly
+regularizes correlations toward zero. The precision $\phi$ has a
+Gamma(4, 0.1) prior with mean 40, consistent with moderate Beta
+dispersion.
+
+\begin{table}[H]
+\centering
+\caption{Priors used across all four models.\label{tab:priors}}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Prior} & \textbf{Rationale} \\
+\midrule
+$\mu_0$ & $\mathcal{N}(0, 1.5)$ & Diffuse on logit scale \\
+$\beta_{\text{lmc}}, \boldsymbol{\beta}_{\text{control}}$ & $\mathcal{N}(0, 0.5)$ & ±1 unit on logit $\approx$ modest effect \\
+$\gamma_{\text{int}}, \gamma_{\text{lmc}}$ & $\mathcal{N}(0, 0.5)$ & Weakly informative moderation \\
+$\sigma_{\text{artist}}, \sigma_{\text{genre}}$ & Half-$\mathcal{N}(0, 0.5)$ & Modest group heterogeneity \\
+$\sigma_{\text{lmc, genre}}$ & Half-$\mathcal{N}(0, 0.3)$ & Tighter: only 4 genres \\
+$\mathbf{L}$ & LKJ(2) & Mild regularization to zero correlation \\
+$\phi$ & Gamma(4, 0.1) & Prior mean $\approx 40$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+## Estimation
+
+All four models are fit in cmdstanr (Stan Development Team 2024) with
+four chains of 4,000 iterations (2,000 warmup, 2,000 sampling). We
+use `adapt_delta = 0.95` to reduce divergent transitions in M4.
+Convergence is assessed via $\hat{R}$, effective sample size, and the
+count of divergent transitions. Models are compared via leave-one-out
+cross-validation (Vehtari, Gelman, and Gabry 2017).
+
+# Results
+
+## Convergence
+
+```{r diagnostics}
+#| label: tbl-diagnostics
+#| tbl-cap: "Convergence summary across the four models."
+
+if (length(models) > 0) {
+
+  track_params   <- c("mu_global", "beta_lmc", "beta_age",
+                       "gamma_intercept", "gamma_lmc",
+                       "sigma_artist", "sigma_genre",
+                       "sigma_lmc_genre", "phi")
+  segment_params <- c("mu_global", "beta_chorus", "beta_verse", "beta_sd",
+                       "beta_age", "gamma_intercept", "gamma_chorus",
+                       "sigma_artist", "sigma_genre",
+                       "sigma_chorus_genre", "phi", "chorus_vs_verse")
+  timeline_params <- c("mu_global", "beta_lmc", "beta_slope", "beta_curve",
+                        "beta_change", "beta_sd", "beta_age",
+                        "gamma_intercept", "gamma_lmc",
+                        "sigma_genre", "sigma_lmc_genre", "phi")
+
+  param_lists <- list(
+    "M1: MuLan Track" = track_params,
+    "M2: CLAP Track"  = track_params,
+    "M3: Segment"     = segment_params,
+    "M4: Timeline"    = timeline_params
+  )
+
+  diag_summary <- map2_dfr(models, names(models), function(fit, label) {
+    params <- intersect(param_lists[[label]], fit$summary()$variable)
+    s <- fit$summary(variables = params)
+    tibble(
+      model         = label,
+      max_rhat      = round(max(s$rhat, na.rm = TRUE), 4),
+      min_ess_bulk  = round(min(s$ess_bulk, na.rm = TRUE), 0),
+      n_rhat_bad    = sum(s$rhat > 1.01, na.rm = TRUE),
+      n_ess_low     = sum(s$ess_bulk < 400, na.rm = TRUE),
+      divergences   = sum(fit$diagnostic_summary()$num_divergent)
+    )
+  })
+
+  kable(diag_summary,
+        col.names = c("Model", "Max R̂", "Min ESS bulk",
+                      "R̂ > 1.01", "ESS < 400", "Divergences"),
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+}
+```
+
+All four models pass standard convergence diagnostics: maximum
+$\hat{R}$ is below 1.003 in every model, minimum bulk ESS exceeds
+2,200, and divergent transitions number at most one (in M1) and zero
+elsewhere.
+
+## Model Comparison
+
+```{r loo-cv}
+#| label: tbl-loo
+#| tbl-cap: "Leave-one-out cross-validation comparison. Higher ELPD per song indicates better out-of-sample predictive performance. Sample sizes differ across models because higher-granularity LMC measures (segment, line-by-line) are unavailable for some songs."
+
+if (length(models) > 0) {
+
+  compute_loo_safe <- function(fit, label) {
+    ll  <- fit$draws("log_lik", format = "matrix")
+    res <- loo(ll, cores = 4)
+    N   <- ncol(ll)
+    tibble(
+      Model     = label,
+      N         = N,
+      ELPD      = res$estimates["elpd_loo", "Estimate"],
+      SE        = res$estimates["elpd_loo", "SE"],
+      LOOIC     = res$estimates["looic", "Estimate"],
+      ELPD_song = res$estimates["elpd_loo", "Estimate"] / N,
+      k_bad     = sum(res$pointwise[, "influence_pareto_k"] > 0.7)
+    )
+  }
+
+  loo_table <- map2_dfr(models, names(models), compute_loo_safe) %>%
+    mutate(across(where(is.numeric), ~round(., 3))) %>%
+    arrange(desc(ELPD_song))
+
+  kable(loo_table,
+        col.names = c("Model", "N", "ELPD", "SE", "LOOIC",
+                      "ELPD/song", "Pareto-k > 0.7"),
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+}
+```
+
+Table \ref{tbl-loo} reports leave-one-out predictive performance. We
+focus on ELPD per song, which is comparable across the unequal sample
+sizes induced by granularity-driven attrition. The segment model (M3)
+achieves the highest predictive density per song at 0.964, edging out
+the track-level CLAP model (M2) at 0.948 and the track-level MuLan
+model (M1) at 0.947. The trajectory model (M4) trails substantially
+at 0.771, largely because its smaller sample provides less information
+per parameter. The advantage of M3 over M1 is modest in absolute
+terms but consistent with the hypothesis that internal structure of
+LMC carries marginal predictive content beyond the track-level
+aggregate. The LOO standard errors imply that the ranking of M1, M2,
+M3 is not distinguishable from chance at conventional levels.
+
+The marginal advantage of M2 (CLAP) over M1 (MuLan) at the track level
+is similarly small. CLAP's broader training distribution may pick up
+perceptual features the MuLan playlist-tag prior misses, or the
+difference may simply reflect noise. Distinguishing these requires
+either a larger corpus or a controlled within-artist comparison.
+
+## Population-Level LMC Effects
+
+```{r lmc-forest}
+#| label: fig-lmc-forest
+#| fig-cap: "Posterior median and 90% credible interval for the population-level LMC coefficient (logit scale) under each of the four models. M3 reports the chorus coefficient as its primary LMC parameter; M4 reports the mean-LMC coefficient. All credible intervals straddle zero."
+#| fig-width: 7
+#| fig-height: 3
+
+if (length(models) > 0) {
+  lmc_coefs <- bind_rows(
+    if (!is.null(fit_m1)) fit_m1$summary("beta_lmc")    %>% mutate(model = "M1: MuLan (track)"),
+    if (!is.null(fit_m2)) fit_m2$summary("beta_lmc")    %>% mutate(model = "M2: CLAP (track)"),
+    if (!is.null(fit_m3)) fit_m3$summary("beta_chorus") %>% mutate(model = "M3: Segment (chorus)"),
+    if (!is.null(fit_m4)) fit_m4$summary("beta_lmc")    %>% mutate(model = "M4: Timeline (mean)")
+  )
+
+  ggplot(lmc_coefs, aes(x = median, y = reorder(model, median))) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = q5, xmax = q95),
+                   height = 0.3, linewidth = 1.0, color = "#2A9D8F") +
+    geom_point(size = 4, color = "#2A9D8F") +
+    labs(x = expression(beta~"(logit scale)"), y = NULL)
+}
+```
+
+Figure \ref{fig-lmc-forest} reports the population-level LMC
+coefficient under each specification. In every case, the posterior
+90% credible interval straddles zero: M1 (MuLan track) gives
+$\hat{\beta}_{\text{lmc}} = 0.006$ with 90% CI $[-0.131, 0.131]$ and
+$P(\beta > 0) = 0.53$; M2 (CLAP) gives median $0.005$ with CI
+$[-0.109, 0.122]$; M3's chorus coefficient has median $-0.005$ with
+CI $[-0.133, 0.123]$; M4's mean-LMC coefficient has median $-0.034$
+with CI $[-0.260, 0.206]$. Hypothesis 1 is therefore *not* supported:
+the data neither confirm nor reject a positive population-level LMC
+effect at the current sample.
+
+The variance components tell a different story. $\sigma_{\text{artist}}$
+is estimated near 0.50 on the logit scale and $\sigma_{\text{genre}}$
+near 0.55 — both substantial, reflecting meaningful baseline popularity
+heterogeneity at the artist and genre levels. $\sigma_{\text{lmc,
+genre}}$, by contrast, is small (around 0.05–0.09), indicating that
+the *slope* of LMC on popularity does not vary dramatically across
+the four genre clusters. Whether this reflects true homogeneity or
+insufficient data to detect heterogeneity cannot be settled here.
+
+## Orientation Moderation
+
+```{r orientation-mod}
+#| label: fig-orientation
+#| fig-cap: "Posterior densities for the orientation × LMC moderation coefficient $\\gamma_\\text{lmc}$ (or $\\gamma_\\text{chorus}$ for M3) under each model. Positive values indicate stronger LMC–popularity coupling for narrative-forward artists."
+#| fig-width: 7
+#| fig-height: 3.5
+
+if (length(models) > 0) {
+  mod_draws <- bind_rows(
+    if (!is.null(fit_m1)) tibble(model = "M1: MuLan Track", gamma = fit_m1$draws(format = "df")$gamma_lmc),
+    if (!is.null(fit_m2)) tibble(model = "M2: CLAP Track",  gamma = fit_m2$draws(format = "df")$gamma_lmc),
+    if (!is.null(fit_m3)) tibble(model = "M3: Segment",     gamma = fit_m3$draws(format = "df")$gamma_chorus),
+    if (!is.null(fit_m4)) tibble(model = "M4: Timeline",    gamma = fit_m4$draws(format = "df")$gamma_lmc)
+  )
+
+  ggplot(mod_draws, aes(x = gamma, fill = model)) +
+    geom_density(alpha = 0.4) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    scale_fill_brewer(palette = "Set2", name = "Model") +
+    labs(x = expression(gamma~"(logit scale)"), y = "Density")
+}
+```
+
+Figure \ref{fig-orientation} reports the orientation × LMC moderation.
+In the track-level models, the moderation coefficient is centered near
+zero (M1: $-0.009$, $P(\gamma > 0) = 0.46$; M2: $-0.078$, $P(\gamma >
+0) = 0.18$). The segment model gives $\hat{\gamma}_{\text{chorus}} =
+0.029$ with $P(\gamma > 0) = 0.64$. The trajectory model produces the
+most directional signal: $\hat{\gamma}_{\text{lmc}} = 0.110$ with 90%
+CI $[-0.188, 0.394]$ and $P(\gamma > 0) = 0.75$. This pattern — the
+moderation effect strengthening as the LMC measure incorporates more
+temporal structure — is consistent with the narrative transportation
+account, which predicts that fine-grained alignment matters more for
+narrative-forward artists. The evidence remains sub-decisive: even in
+M4, the credible interval admits a null. Hypothesis 2 is *directionally
+supported but inconclusive*.
+
+## Genre Heterogeneity
+
+```{r genre-effects}
+#| label: fig-genre
+#| fig-cap: "Genre-specific intercepts (top) and genre-varying LMC slopes (bottom) from M1 (track-level MuLan). Genre intercepts are large in magnitude, reflecting baseline popularity differences across clusters. Genre-varying LMC slopes are small and overlapping, reflecting limited differentiation in LMC sensitivity across the four clusters at the current sample size."
+#| fig-width: 7
+#| fig-height: 6
+
+if (!is.null(fit_m1) && !is.null(master)) {
+
+  n_genre <- length(unique(master$genre_cluster[!is.na(master$genre_cluster) &
+                                                 master$genre_cluster != "Other"]))
+  genre_levels <- sort(unique(master$genre_cluster[master$genre_cluster != "Other"]))
+
+  genre_int_params <- paste0("alpha_genre[", 1:n_genre, "]")
+  genre_int_post <- fit_m1$summary(variables = genre_int_params) %>%
+    mutate(genre = genre_levels[as.integer(str_extract(variable, "\\d+"))]) %>%
+    filter(!is.na(genre))
+
+  p_genre_int <- ggplot(genre_int_post, aes(x = median, y = reorder(genre, median),
+                                             color = genre)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = q5, xmax = q95), height = 0.3, linewidth = 1.0) +
+    geom_point(size = 3.5) +
+    scale_color_manual(values = GENRE_COLS, guide = "none") +
+    labs(title = "Genre intercepts (baseline popularity)",
+         x = expression(alpha[genre]), y = NULL)
+
+  genre_lmc_params <- paste0("beta_lmc_genre[", 1:n_genre, "]")
+  genre_lmc_post <- fit_m1$summary(variables = genre_lmc_params) %>%
+    mutate(genre = genre_levels[as.integer(str_extract(variable, "\\d+"))]) %>%
+    filter(!is.na(genre))
+
+  p_genre_lmc <- ggplot(genre_lmc_post, aes(x = median, y = reorder(genre, median),
+                                             color = genre)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = q5, xmax = q95), height = 0.3, linewidth = 1.0) +
+    geom_point(size = 3.5) +
+    scale_color_manual(values = GENRE_COLS, guide = "none") +
+    labs(title = "Genre-varying LMC slopes",
+         x = expression(beta[lmc][","][genre]), y = NULL)
+
+  p_genre_int / p_genre_lmc
+}
+```
+
+Figure \ref{fig-genre} disaggregates the genre effects in M1. Pop has
+the highest baseline popularity, followed by hip-hop, electronic, and
+folk/country — consistent with the recency weighting and the heavy
+playlist promotion pop receives. The genre-varying LMC slopes are
+small with overlapping credible intervals; I cannot claim any one
+genre's LMC sensitivity is meaningfully different from another's at
+the current sample.
+
+## Segment and Trajectory Decompositions
+
+```{r chorus-vs-verse}
+#| label: fig-segment
+#| fig-cap: "M3 segment model: posterior densities for chorus LMC, verse LMC, and the chorus–verse contrast. Black bars show 80% and 95% credible intervals. The chorus coefficient is centered slightly above the verse coefficient, but with overlapping intervals."
+#| fig-width: 7
+#| fig-height: 3.5
+#| eval: !expr '!is.null(fit_m3)'
+
+if (!is.null(fit_m3)) {
+  m3_draws <- fit_m3$draws(format = "df")
+
+  tibble(
+    `Chorus LMC (β_chorus)` = m3_draws$beta_chorus,
+    `Verse LMC (β_verse)`   = m3_draws$beta_verse,
+    `Chorus − Verse (Δ)`    = m3_draws$chorus_vs_verse
+  ) %>%
+    pivot_longer(everything(), names_to = "param", values_to = "value") %>%
+    ggplot(aes(x = value, y = param, fill = after_stat(x > 0))) +
+    stat_halfeye(.width = c(0.8, 0.95), point_interval = median_hdi) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("FALSE" = "#E76F51", "TRUE" = "#2A9D8F"),
+                      guide = "none") +
+    labs(subtitle = paste0("P(Chorus > Verse) = ",
+                          round(mean(m3_draws$chorus_vs_verse > 0), 3)),
+         x = "Coefficient (logit scale)", y = NULL)
+}
+```
+
+The segment model offers the most directly interpretable internal
+structure (Figure \ref{fig-segment}). The chorus coefficient
+$\hat{\beta}_{\text{chorus}} = -0.005$ is near zero. The verse
+coefficient $\hat{\beta}_{\text{verse}} = -0.035$ with 90% CI
+$[-0.091, 0.022]$ is more clearly negative-leaning, with $P(\beta < 0)
+= 0.84$. The chorus–verse contrast yields $P(\Delta > 0) = 0.64$ —
+directional support for Hypothesis 3a, but short of decisive evidence.
+
+The clearest directional signal in M3 comes from the within-song
+consistency parameter: $\hat{\beta}_{\text{sd}} = -0.044$ with 90% CI
+$[-0.083, -0.003]$ and $P(\beta_{\text{sd}} < 0) = 0.96$. Because
+$\beta_{\text{sd}}$ multiplies the *standard deviation* of segment
+LMC, a negative coefficient implies that songs whose LMC is more
+consistent across their internal structure are more popular,
+controlling for mean LMC. This is the most credible signal in our
+current results and provides directional support for Hypothesis 3b.
+The magnitude is modest (a one-SD increase in within-song LMC
+variability is associated with roughly a 1.1 popularity-point
+decrease at the prior mean precision), and the result rests on a
+324-song sample.
+
+```{r trajectory}
+#| label: fig-trajectory
+#| fig-cap: "M4 trajectory model: posterior densities for the five trajectory features of LMC (mean level, slope, curvature, early-to-late change, and consistency)."
+#| fig-width: 7
+#| fig-height: 4
+#| eval: !expr '!is.null(fit_m4)'
+
+if (!is.null(fit_m4)) {
+  m4_labels <- c(
+    "beta_lmc"    = "Mean LMC (level)",
+    "beta_slope"  = "Slope (builds over song?)",
+    "beta_curve"  = "Curvature (mid-song peak?)",
+    "beta_change" = "Early→Late (strong finish?)",
+    "beta_sd"     = "Consistency (stable LMC?)"
+  )
+
+  fit_m4$draws(format = "df") %>%
+    select(all_of(names(m4_labels))) %>%
+    pivot_longer(everything(), names_to = "param", values_to = "value") %>%
+    mutate(param = recode(param, !!!m4_labels)) %>%
+    ggplot(aes(x = value, y = param, fill = after_stat(x > 0))) +
+    stat_halfeye(.width = c(0.8, 0.95), point_interval = median_hdi) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("FALSE" = "#E76F51", "TRUE" = "#2A9D8F"),
+                      guide = "none") +
+    labs(x = "Coefficient (logit scale)", y = NULL)
+}
+```
+
+The trajectory model (Figure \ref{fig-trajectory}) decomposes LMC into
+five features. Slope, curvature, and early-to-late change all have
+posterior densities centered near zero with wide credible intervals
+admitting either sign — Hypothesis 4 is *not* supported at the current
+sample. The consistency coefficient $\hat{\beta}_{\text{sd}} = -0.085$
+with 90% CI $[-0.172, 0.003]$ and $P(\beta_{\text{sd}} < 0) = 0.94$
+replicates the M3 finding on within-song consistency, with wider
+intervals reflecting the smaller sample (N = 114). Curvature shows a
+posterior median of $-0.068$ with $P(\beta < 0) = 0.90$, mildly
+suggestive of an inverted-U over the song's duration but sub-decisive.
+
+## Simulation-Based Parameter Recovery
+
+To validate that the segment model can recover known parameter values
+at my observed sample size, I conducted a simulation study. We
+generated 50 synthetic datasets calibrated to the observed sample
+(N = 350 songs, 30 artists, 4 genres) using a chosen vector of "true"
+parameters drawn from reasonable priors (e.g., $\beta_{\text{chorus}}^*
+= 0.15$, $\beta_{\text{verse}}^* = 0.05$, $\beta_{\text{sd}}^* = -0.10$).
+For each synthetic dataset I re-fit M3 and recorded coverage of the
+true value. The model recovers core slope parameters with approximate
+calibration: 90% credible intervals cover the truth approximately
+80–90% of the time, with mild under-coverage on variance components.
+This implies that the credible intervals reported in the empirical
+results are roughly calibrated. The exercise does not address
+identification under unobserved confounders, only the statistical
+coherence of the specification.
+
+# Discussion
+
+The population-level LMC effect on Spotify popularity, controlling
+for artist, genre, song age, and audio mood, is statistically
+inconclusive at my present sample of 359 songs. Two interpretations
+are consistent with the data. Under the first, LMC has no causal
+effect on streaming engagement — listeners reward distinctive songs
+whether or not their channels are emotionally aligned, and the
+theoretical accounts motivating this study are wrong or apply outside
+the current corpus. Under the second, LMC has the predicted positive
+effect but my power to detect it is insufficient at the current
+sample size and data representation. The two interpretations cannot be
+distinguished by the present data alone.
+
+What the current evidence *does* support, at directional but
+sub-decisive levels of confidence, is a more nuanced picture in which
+*structural* features of LMC matter more than its overall level.
+Within-song consistency has the most credible signal in both M3 and
+M4 (posterior probability of the predicted sign $\geq 0.94$),
+suggesting that listeners are more sensitive to the *stability* of
+cross-modal alignment than to its average. The chorus–verse contrast
+and the orientation × LMC moderation in the trajectory model are
+directionally consistent with their respective hypotheses, but
+neither rises to confirmatory evidence. Separately, the segment model
+(M3) offers the best out-of-sample fit — consistent with a story in
+which the internal structure of LMC carries information the
+song-level aggregate discards.
+
+Several threats to inference apply. First, the data-generating
+process described in Section \ref{conceptual-framework-and-hypotheses}
+implies unblockable backdoor paths from artist and genre into
+popularity through unobserved promotion, playlist placement, and
+social distribution. I have no credible instrument for LMC at the
+song level. The strongest available identification is *within-artist*
+variation, but with roughly 10 songs per artist this is thin. Second,
+our controls absorb observed audio characteristics but not
+listener-level effects driving streaming behavior at scale. Third,
+the outcome itself is the product of Spotify's algorithm; songs more
+aligned with playlist contexts may receive more algorithmic exposure,
+biasing the LMC–popularity association in either direction depending
+on what the algorithm rewards. These threats place a ceiling on the
+inferential force of any single-cross-section analysis with
+publicly-scraped data. The path forward is therefore as much about
+broadening data and tightening identification as fitting better
+models.
+
+# Limitations and the Path Forward
+
+The structure of the next phase follows directly from the limitations
+identified above. I organize it under four priorities.
+
+## Sample Expansion and Embedding Robustness
+
+The most binding constraint is sample size. my 359 songs deliver
+insufficient power to distinguish a small-but-real LMC effect from a
+true null. I will expand the corpus to additional artists within the
+four existing clusters and to additional genres (R&B, Latin pop,
+indie rock, classical, and jazz where relevant) so that the
+production–narrative spectrum is more densely populated, and move from
+purposive artist sampling toward a *systematic sample from Spotify's
+recommendation distribution* — seeding the algorithm with anchor
+tracks across the popularity range and crawling the neighborhood of
+each anchor, yielding a sample that better represents the full
+popularity distribution rather than concentrating in the right tail.
+In parallel, I will complete the MERT + Sentence-BERT late-fusion
+baseline and re-estimate all four models: comparable predictive
+validity would imply joint training contributes little, while inferior
+performance would directly evidence the value of contrastive joint
+training. I will also run M3 and M4 on CLAP-derived segment and
+line-level LMC; at present these higher-granularity analyses use only
+MuLan.
+
+## Refining Segmenting and Trajectory Analysis
+
+Our higher-granularity measures suffer from sparsity (M3: 324/359;
+M4: 114/359) driven by failures of WhisperX forced alignment. Planned
+improvements include structurally-aware segmentation that uses lyric
+section headers as anchors and falls back to alignment only within
+sections; alternative aligners (e.g., NeMo's ASR models, Koluguri,
+Park, and Ginsburg 2022); and an examination of whether segment
+*ordering* matters — does the sequence of high- and low-LMC segments
+predict popularity beyond their average and variance? — as a richer
+test of Hypothesis 4.
+
+## Generation Experiments and Human Validation
+
+The strongest evidence for a causal LMC effect would come from
+experimental manipulation. I plan a generation experiment in which
+a base song is counterfactually re-lyriced with content of varying
+emotional alignment to its musical bed, holding other features fixed.
+Generative lyric models conditioned on a target embedding region,
+combined with controlled human evaluation, would isolate the causal
+effect of LMC on listener-level outcomes (liking, predicted listening
+time, repeat-listening intent) free from observational confounds.
+This track also produces *human reference scores* providing external
+validation of the cosine similarity itself — a machine-internal
+quantity that should be calibrated against human judgment before
+being treated as a marketing-relevant construct.
+
+## Better Outcomes and Sharper Identification
+
+Our coarsest constraint is the outcome variable. Spotify's popularity
+index aggregates discovery, retention, repeat listening, skip
+behavior, and shareability into a single bounded score, each
+plausibly affected differently by LMC: transportation predicts higher
+retention and repeat-listening rates, while fluency predicts higher
+initial liking. Discriminating these requires listener-level
+behavioral data of a kind no public API provides; I will continue
+to pursue a research partnership with Spotify, Apple Music, or
+another platform. In its absence I will broaden outcomes using
+public signals — chart position, playlist appearances, and per-song
+streams from financial filings.
+
+Identification will improve from two further sources of within-unit
+variation. *Within-album* comparisons restrict to songs released
+simultaneously on the same album, absorbing essentially all
+album-launch promotional shocks. *Cover versions* — multiple
+recordings of the same composition by different artists — hold
+lyrical content fixed while varying audio production, so that LMC
+variation is by construction attributable to production choices
+rather than lyric writing.
+
+\bigskip
+
+We close by noting what this paper does and does not claim. It does
+not claim to have established that lyric–music congruence raises
+streaming popularity. It does claim to have built a measurement
+pipeline operationalizing a previously elusive construct, specified
+a hierarchical Bayesian framework appropriate to the data structure,
+produced an honest first-pass empirical estimate, and laid out the
+design choices, identification threats, and next steps that will
+determine whether the construct matters commercially.
+
+# References {.unnumbered}
+
+\begingroup
+\setlength{\parindent}{-0.4in}
+\setlength{\leftskip}{0.4in}
+\noindent
+
+Areni, C. S., and D. Kim. 1993. "The Influence of Background Music on
+Shopping Behavior: Classical versus Top-Forty Music in a Wine Store."
+*Advances in Consumer Research* 20: 336–340.
+
+Askin, N., and M. Mauskapf. 2017. "What Makes Popular Culture Popular?
+Product Features and Optimal Differentiation in Music." *American
+Sociological Review* 82(5): 910–944.
+
+Bain, M., J. Huh, T. Han, and A. Zisserman. 2023. "WhisperX: Time-Accurate
+Speech Transcription of Long-Form Audio." *Proceedings of Interspeech*
+2023: 4489–4493.
+
+Berger, J., A. Humphreys, S. Ludwig, W. W. Moe, O. Netzer, and D. A.
+Schweidel. 2020. "Uniting the Tribes: Using Text for Marketing Insight."
+*Journal of Marketing* 84(1): 1–25.
+
+Berlyne, D. E. 1971. *Aesthetics and Psychobiology*. New York:
+Appleton-Century-Crofts.
+
+Bogdanov, D., N. Wack, E. Gómez, S. Gulati, P. Herrera, O. Mayor, G.
+Roma, J. Salamon, J. R. Zapata, and X. Serra. 2013. "Essentia: An Audio
+Analysis Library for Music Information Retrieval." *Proceedings of the
+14th International Society for Music Information Retrieval Conference
+(ISMIR)*: 493–498.
+
+Dew, R., and A. Ansari. 2018. "Bayesian Nonparametric Customer Base
+Analysis with Model-Based Visualizations." *Marketing Science* 37(2):
+216–235.
+
+Eerola, T., and J. K. Vuoskoski. 2011. "A Comparison of the Discrete and
+Dimensional Models of Emotion in Music." *Psychology of Music* 39(1):
+18–49.
+
+Ferrari, S., and F. Cribari-Neto. 2004. "Beta Regression for Modelling
+Rates and Proportions." *Journal of Applied Statistics* 31(7): 799–815.
+
+Fong, H., V. Kumar, and K. Sudhir. 2024. "A Theory-Based Explainable Deep
+Learning Architecture for Music Emotion." Working paper, Yale School of
+Management. arXiv:2408.07113.
+
+Gabrielsson, A. 2002. "Emotion Perceived and Emotion Felt: Same or
+Different?" *Musicae Scientiae* 5(1, supplement): 123–147.
+
+Green, M. C., and T. C. Brock. 2000. "The Role of Transportation in the
+Persuasiveness of Public Narratives." *Journal of Personality and Social
+Psychology* 79(5): 701–721.
+
+Hekkert, P. 2006. "Design Aesthetics: Principles of Pleasure in Design."
+*Psychology Science* 48(2): 157–172.
+
+Huang, Q., A. Jansen, J. Lee, R. Ganti, J. Y. Li, and D. P. W. Ellis.
+2022. "MuLan: A Joint Embedding of Music Audio and Natural Language."
+*Proceedings of the 23rd International Society for Music Information
+Retrieval Conference (ISMIR)*: 277–285.
+
+IFPI. 2024. *Global Music Report 2024*. London: International Federation
+of the Phonographic Industry.
+
+Koluguri, N. R., T. Park, and B. Ginsburg. 2022. "TitaNet: Neural Model
+for Speaker Representation with 1D Depth-Wise Separable Convolutions and
+Global Context." *Proceedings of the IEEE International Conference on
+Acoustics, Speech and Signal Processing (ICASSP)*: 8102–8106.
+
+Landwehr, J. R., A. A. Labroo, and A. Herrmann. 2011. "Gut Liking for
+the Ordinary: Incorporating Design Fluency Improves Automobile Sales
+Forecasts." *Marketing Science* 30(3): 416–429.
+
+Lee, A. Y., and A. A. Labroo. 2004. "The Effect of Conceptual and
+Perceptual Fluency on Brand Evaluation." *Journal of Marketing Research*
+41(2): 151–165.
+
+Lena, J. C., and R. A. Peterson. 2008. "Classification as Culture: Types
+and Trajectories of Music Genres." *American Sociological Review* 73(5):
+697–718.
+
+Ma, Y., R. Yuan, Y. Li, G. Zhang, X. Chen, H. Yin, C. Lin, A. Ragni, E.
+Benetos, N. Gyenge, et al. 2023. "MERT: Acoustic Music Understanding
+Model with Large-Scale Self-Supervised Training." arXiv:2306.00107.
+
+MacInnis, D. J., and C. W. Park. 1991. "The Differential Role of
+Characteristics of Music on High- and Low-Involvement Consumers'
+Processing of Ads." *Journal of Consumer Research* 18(2): 161–173.
+
+Melvill-Smith, S., A. E. Krause, and A. C. North. 2023. "Song Popularity
+and Processing Fluency of Lyrics." *Psychology of Music* 51(3): 712–726.
+
+North, A. C., and D. J. Hargreaves. 1995. "Subjective Complexity,
+Familiarity, and Liking for Popular Music." *Psychomusicology: A Journal
+of Research in Music Cognition* 14(1–2): 77–93.
+
+North, A. C., D. J. Hargreaves, and J. McKendrick. 1999. "The Influence
+of In-Store Music on Wine Selections." *Journal of Applied Psychology*
+84(2): 271–276.
+
+Ordanini, A., J. C. Nunes, and A. Nanni. 2018. "The Featuring Phenomenon
+in Music: How Combining Artists of Different Genres Increases a Song's
+Popularity." *Marketing Letters* 29(4): 485–499.
+
+Panda, R., R. Malheiro, and R. P. Paiva. 2023. "Audio Features for Music
+Emotion Recognition: A Survey." *IEEE Transactions on Affective
+Computing* 14(1): 68–88.
+
+Phillips, B. J., and E. F. McQuarrie. 2010. "Narrative and Persuasion
+in Fashion Advertising." *Journal of Consumer Research* 37(3): 368–392.
+
+Radford, A., J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal, G.
+Sastry, A. Askell, P. Mishkin, J. Clark, G. Krueger, and I. Sutskever.
+2021. "Learning Transferable Visual Models from Natural Language
+Supervision." *Proceedings of the 38th International Conference on
+Machine Learning (ICML)*: 8748–8763.
+
+Reber, R., N. Schwarz, and P. Winkielman. 2004. "Processing Fluency and
+Aesthetic Pleasure: Is Beauty in the Perceiver's Processing Experience?"
+*Personality and Social Psychology Review* 8(4): 364–382.
+
+Reimers, N., and I. Gurevych. 2019. "Sentence-BERT: Sentence Embeddings
+Using Siamese BERT-Networks." *Proceedings of the 2019 Conference on
+Empirical Methods in Natural Language Processing (EMNLP)*: 3982–3992.
+
+Salganik, M. J., P. S. Dodds, and D. J. Watts. 2006. "Experimental Study
+of Inequality and Unpredictability in an Artificial Cultural Market."
+*Science* 311(5762): 854–856.
+
+Smithson, M., and J. Verkuilen. 2006. "A Better Lemon Squeezer?
+Maximum-Likelihood Regression with Beta-Distributed Dependent Variables."
+*Psychological Methods* 11(1): 54–71.
+
+Spotify AB. 2024. "Spotify Web API Reference: Track Object — Popularity."
+https://developer.spotify.com/documentation/web-api/reference/get-track.
+Accessed April 2024.
+
+Stan Development Team. 2024. *cmdstanr: R Interface to CmdStan*. R
+package version 0.7.
+
+Toubia, O., G. Iyengar, R. Bunnell, and A. Lemaire. 2019. "Extracting
+Features of Entertainment Products: A Large-Scale Simultaneous
+Segmentation and Estimation Approach." *Marketing Science* 38(1):
+187–207.
+
+Van Laer, T., K. De Ruyter, L. M. Visconti, and M. Wetzels. 2014. "The
+Extended Transportation-Imagery Model: A Meta-Analysis of the
+Antecedents and Consequences of Consumers' Narrative Transportation."
+*Journal of Consumer Research* 40(5): 797–817.
+
+Vehtari, A., A. Gelman, and J. Gabry. 2017. "Practical Bayesian Model
+Evaluation Using Leave-One-Out Cross-Validation and WAIC." *Statistics
+and Computing* 27(5): 1413–1432.
+
+Whitman, B. 2005. *Learning the Meaning of Music*. PhD dissertation,
+Massachusetts Institute of Technology.
+
+Winkielman, P., J. Halberstadt, T. Fazendeiro, and S. Catty. 2006.
+"Prototypes Are Attractive Because They Are Easy on the Mind."
+*Psychological Science* 17(9): 799–806.
+
+Wu, Y., K. Chen, T. Zhang, Y. Hui, T. Berg-Kirkpatrick, and S. Dubnov.
+2023. "Large-Scale Contrastive Language–Audio Pretraining with Feature
+Fusion and Keyword-to-Caption Augmentation." *Proceedings of the IEEE
+International Conference on Acoustics, Speech and Signal Processing
+(ICASSP)*: 1–5.
+
+Yang, Y.-H., and H. H. Chen. 2012. "Machine Recognition of Music Emotion:
+A Review." *ACM Transactions on Intelligent Systems and Technology* 3(3):
+40:1–40:30.
+
+Zajonc, R. B. 1968. "Attitudinal Effects of Mere Exposure." *Journal of
+Personality and Social Psychology Monograph Supplement* 9(2, Pt. 2): 1–27.
+
+\endgroup

@@ -1,0 +1,12 @@
+        part                       term statistic Track LMC  Seg Mean Chorus LMC      Both
+1  estimates                (Intercept)  estimate 63.983*** 63.982***  65.262*** 65.342***
+2  estimates                (Intercept) std.error   (4.146)   (4.159)    (3.619)   (3.672)
+3  estimates           scale(lmc_mulan)  estimate     1.091                          2.550
+4  estimates           scale(lmc_mulan) std.error   (1.007)                        (1.846)
+5  estimates        scale(seg_mean_lmc)  estimate               1.161                     
+6  estimates        scale(seg_mean_lmc) std.error             (0.975)                     
+7  estimates      scale(seg_chorus_lmc)  estimate                         -0.503    -2.237
+8  estimates      scale(seg_chorus_lmc) std.error                        (1.128)   (1.678)
+9  estimates SD (Intercept artist_code)  estimate    14.057    14.103     11.977    12.178
+10 estimates          SD (Observations)  estimate     9.729     9.719      9.528     9.410
+11       gof                   Num.Obs.                 156       156        101       101

@@ -1,0 +1,948 @@
+---
+title: "Lyric-Music Congruence and Song Popularity"
+subtitle: "Bayesian Model Comparison Report"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    fig-width: 10
+    fig-height: 7
+    fig-dpi: 300
+    self-contained: true
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| label: setup
+#| code-fold: false
+
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(loo)
+library(tidyverse)
+library(patchwork)
+library(ggdist)
+library(scales)
+library(here)
+library(knitr)
+library(kableExtra)
+
+BAYES_DIR  <- here::here("bayes")
+OUTPUT_DIR <- file.path(BAYES_DIR, "output")
+
+theme_set(
+ theme_minimal(base_size = 12) +
+   theme(plot.title      = element_text(face = "bold", size = 14),
+         plot.subtitle   = element_text(color = "grey40"),
+         legend.position = "bottom",
+         panel.grid.minor = element_blank(),
+         strip.text       = element_text(face = "bold"))
+)
+
+ORIENT_COLS <- c("narrative" = "#2A9D8F", "production" = "#E76F51")
+GENRE_COLS  <- c("Hip-Hop" = "#E63946", "Folk/Country" = "#2A9D8F",
+                "Pop" = "#457B9D", "Electronic" = "#9B2335")
+
+zsc <- function(x) as.numeric(scale(x))
+boundary_adjust <- function(y01, N) (y01 * (N - 1) + 0.5) / N
+```
+
+
+# Introduction
+
+This report compares four Bayesian hierarchical models estimating the
+effect of lyric-music congruence (LMC) on Spotify song popularity. LMC
+is defined as the cosine similarity between a song's audio embedding and
+its lyric embedding in a shared latent space. The core hypothesis is that
+songs where what the music sounds like is semantically aligned with what
+the lyrics say will, all else equal, attract more listeners.
+
+The four models operationalise LMC at increasing levels of temporal
+granularity:
+
+| Model | LMC measure | Embedding model |
+|-------|-------------|-----------------|
+| M1 | Track-level cosine similarity | MuQ-MuLan |
+| M2 | Track-level cosine similarity | LAION-CLAP-Music |
+| M3 | Chorus/verse/consistency decomposition | MuQ-MuLan |
+| M4 | Trajectory shape (slope, curvature, early→late, SD) | MuQ-MuLan |
+
+All models share: Beta regression likelihood, partial pooling by artist
+(random intercepts) and genre (random intercepts), a song-age control
+for Spotify's recency weighting, Essentia-derived mood tag controls,
+and an orientation moderation term (narrative vs. production-forward).
+
+
+# Model Specifications
+
+## Shared structure
+
+All four models use a Beta likelihood with logit link:
+
+$$
+y_i \sim \text{Beta}(\mu_i \cdot \phi,\; (1-\mu_i) \cdot \phi)
+$$
+
+where $y_i \in (0,1)$ is the boundary-adjusted Spotify popularity score
+and $\phi > 0$ is a precision parameter. The mean is linked to the
+linear predictor via:
+
+$$
+\text{logit}(\mu_i) = \eta_i
+$$
+
+### Partial pooling
+
+Artist random intercepts (non-centred parameterisation):
+
+$$
+\alpha_{\text{artist}[j]} = \mu_0 + \gamma_{\text{int}} \cdot \text{orient}_j + \sigma_{\text{artist}} \cdot z_j, \quad z_j \sim \mathcal{N}(0, 1)
+$$
+
+Genre random intercepts:
+
+$$
+\alpha_{\text{genre}[g]} \sim \mathcal{N}(0, \sigma_{\text{genre}})
+$$
+
+### Control variables
+
+All models include song age and 7 Librosa mood tag controls (z-scored):
+$\beta_{\text{age}}, \beta_{\text{happy}}, \beta_{\text{sad}},
+\beta_{\text{relaxed}}, \beta_{\text{aggressive}}, \beta_{\text{party}},
+\beta_{\text{dance}}, \beta_{\text{voice}}$.
+
+
+## M1/M2: Track-level models
+
+$$
+\eta_i = \alpha_{\text{artist}[j]} + \alpha_{\text{genre}[g]}
+  + (\beta_{\text{lmc}} + \gamma_{\text{lmc}} \cdot \text{orient}_j) \cdot \text{LMC}_{z,i}
+  + \mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}
+$$
+
+M1 uses MuQ-MuLan LMC scores; M2 uses LAION-CLAP-Music scores.
+Same Stan code (`model_track.stan`), different data.
+
+
+## M3: Segment model
+
+$$
+\eta_i = \alpha_{\text{artist}[j]} + \alpha_{\text{genre}[g]}
+  + (\beta_{\text{chorus}} + \gamma_{\text{chorus}} \cdot \text{orient}_j) \cdot \text{chorus}_{z,i}
+  + \beta_{\text{verse}} \cdot \text{verse}_{z,i}
+  + \beta_{\text{sd}} \cdot \text{sd}_{z,i}
+  + \mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}
+$$
+
+Contrast of interest: $\Delta = \beta_{\text{chorus}} - \beta_{\text{verse}}$.
+$P(\Delta > 0)$ gives the posterior probability that chorus congruence
+matters more than verse congruence.
+
+
+## M4: Timeline model
+
+$$
+\eta_i = \alpha_{\text{artist}[j]} + \alpha_{\text{genre}[g]}
+  + \beta_{\text{lmc}[j]} \cdot \overline{\text{LMC}}_{z,i}
+  + \beta_{\text{slope}} \cdot \text{slope}_{z,i}
+  + \beta_{\text{curve}} \cdot \text{curve}_{z,i}
+  + \beta_{\text{change}} \cdot \text{change}_{z,i}
+  + \beta_{\text{sd}} \cdot \text{sd}_{z,i}
+  + \mathbf{x}_i^\top \boldsymbol{\beta}_{\text{control}}
+$$
+
+where $\beta_{\text{lmc}[j]}$ is an artist-varying LMC slope via
+bivariate NCP:
+
+$$
+\begin{pmatrix} \alpha_{\text{artist}[j]} \\ \beta_{\text{lmc}[j]} \end{pmatrix}
+= \begin{pmatrix} \mu_0 + \gamma_{\text{int}} \cdot \text{orient}_j \\
+\beta_{\text{lmc}} + \gamma_{\text{lmc}} \cdot \text{orient}_j \end{pmatrix}
++ \text{diag}(\boldsymbol{\sigma}) \cdot \mathbf{L} \cdot \mathbf{z}_j
+$$
+
+
+### Priors (all models)
+
+| Parameter | Prior | Rationale |
+|-----------|-------|-----------|
+| $\mu_0$ | $\mathcal{N}(0, 1.5)$ | Diffuse on logit scale |
+| $\beta_{\text{lmc}}, \beta_{\text{controls}}$ | $\mathcal{N}(0, 0.5)$ | ±1 unit on logit ≈ modest effect |
+| $\gamma_{\text{int}}, \gamma_{\text{lmc}}$ | $\mathcal{N}(0, 0.5)$ | Weakly informative moderation |
+| $\sigma_{\text{artist}}, \sigma_{\text{genre}}$ | $\text{Half-}\mathcal{N}(0, 0.5)$ | Modest group heterogeneity |
+| $\mathbf{L}$ | $\text{LKJ}(2)$ | Mild regularisation toward zero correlation |
+| $\phi$ | $\text{Gamma}(4, 0.1)$ | Prior mean ≈ 40 (moderate precision) |
+
+
+# Load Data and Fits
+
+```{r load-data}
+#| label: load-data
+
+master <- read_csv(here::here("results", "master_results.csv"),
+                   show_col_types = FALSE) %>%
+  mutate(
+    release_year = as.numeric(substr(release_date, 1, 4)),
+    song_age     = 2025 - release_year,
+    genre_cluster = case_when(
+      genre %in% c("hip-hop")                              ~ "Hip-Hop",
+      genre %in% c("folk", "folk-rock", "country")        ~ "Folk/Country",
+      genre %in% c("pop")                                  ~ "Pop",
+      genre %in% c("electronic", "psychedelic-electronic") ~ "Electronic",
+      TRUE                                                 ~ "Other"
+    ),
+    orientation = factor(orientation, levels = c("production", "narrative"))
+  )
+
+# Load mood data
+mood_path <- here::here("results", "essentia_mood.csv")
+if (file.exists(mood_path)) {
+  mood <- read_csv(mood_path, show_col_types = FALSE) %>%
+    select(song_id, mood_happy, mood_sad, mood_relaxed,
+           mood_aggressive, mood_party, danceability, voice_instrumental)
+  master <- master %>% left_join(mood, by = "song_id")
+}
+
+cat(sprintf("Master data: %d songs, %d artists, %d genre clusters\n",
+            nrow(master), n_distinct(master$artist_code),
+            n_distinct(master$genre_cluster)))
+```
+
+```{r load-fits}
+#| label: load-fits
+
+# Load pre-saved fit objects
+fit_m1 <- readRDS(file.path(OUTPUT_DIR, "fit_M1_mulan_track.rds"))
+fit_m2 <- readRDS(file.path(OUTPUT_DIR, "fit_M2_clap_track.rds"))
+fit_m3 <- tryCatch(readRDS(file.path(OUTPUT_DIR, "fit_M3_segment.rds")),
+                   error = function(e) NULL)
+fit_m4 <- tryCatch(readRDS(file.path(OUTPUT_DIR, "fit_M4_timeline.rds")),
+                   error = function(e) NULL)
+
+models <- list(
+  "M1: MuLan Track"  = fit_m1,
+  "M2: CLAP Track"   = fit_m2,
+  "M3: Segment"      = fit_m3,
+  "M4: Timeline"     = fit_m4
+) %>% compact()
+
+cat(sprintf("Loaded %d model fits.\n", length(models)))
+```
+
+
+# Convergence Diagnostics
+
+Good convergence requires: $\hat{R} < 1.01$, $\text{ESS}_{\text{bulk}} > 400$,
+and zero divergent transitions.
+
+```{r diagnostics}
+#| label: diagnostics
+
+track_params   <- c("mu_global", "beta_lmc", "beta_age",
+                     "gamma_intercept", "gamma_lmc",
+                     "sigma_artist", "sigma_genre", "phi",
+                     "beta_happy", "beta_sad", "beta_relaxed",
+                     "beta_aggressive", "beta_party", "beta_dance", "beta_voice")
+
+segment_params <- c("mu_global", "beta_chorus", "beta_verse", "beta_sd",
+                     "beta_age", "gamma_intercept", "gamma_chorus",
+                     "sigma_artist", "sigma_genre", "phi",
+                     "chorus_vs_verse",
+                     "beta_happy", "beta_sad", "beta_relaxed",
+                     "beta_aggressive", "beta_party", "beta_dance", "beta_voice")
+
+timeline_params <- c("mu_global", "beta_lmc", "beta_slope", "beta_curve",
+                      "beta_change", "beta_sd", "beta_age",
+                      "gamma_intercept", "gamma_lmc",
+                      "sigma_artist[1]", "sigma_artist[2]",
+                      "sigma_genre", "phi", "Rho_artist[1,2]",
+                      "beta_happy", "beta_sad", "beta_relaxed",
+                      "beta_aggressive", "beta_party", "beta_dance", "beta_voice")
+
+param_lists <- list(
+  "M1: MuLan Track" = track_params,
+  "M2: CLAP Track"  = track_params,
+  "M3: Segment"     = segment_params,
+  "M4: Timeline"    = timeline_params
+)
+
+diag_all <- map2_dfr(models, names(models), function(fit, label) {
+  params <- param_lists[[label]]
+  fit$summary(variables = params) %>%
+    select(variable, mean, median, sd, q5, q95, rhat, ess_bulk, ess_tail) %>%
+    mutate(model = label, .before = 1)
+})
+
+# Summary table
+diag_summary <- diag_all %>%
+  group_by(model) %>%
+  summarise(
+    max_rhat      = round(max(rhat, na.rm = TRUE), 4),
+    min_ess_bulk  = round(min(ess_bulk, na.rm = TRUE), 0),
+    n_rhat_bad    = sum(rhat > 1.01, na.rm = TRUE),
+    n_ess_low     = sum(ess_bulk < 400, na.rm = TRUE),
+    divergences   = {
+      fit <- models[[first(model)]]
+      sum(fit$diagnostic_summary()$num_divergent)
+    },
+    .groups = "drop"
+  )
+
+kable(diag_summary, caption = "Convergence summary across models",
+      col.names = c("Model", "Max R̂", "Min ESS", "R̂ > 1.01",
+                    "ESS < 400", "Divergences")) %>%
+  kable_styling(full_width = FALSE)
+```
+
+
+## Traceplots
+
+```{r traceplots}
+#| label: traceplots
+#| fig-height: 10
+
+# M1 traceplots
+mcmc_trace(fit_m1$draws(format = "array"),
+           pars = c("beta_lmc", "gamma_lmc", "sigma_artist", "sigma_genre"),
+           facet_args = list(ncol = 2)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "M1: MuLan Track — Key Parameters")
+```
+
+```{r traceplots-m3}
+#| label: traceplots-m3
+#| fig-height: 10
+#| eval: !expr '!is.null(fit_m3)'
+
+mcmc_trace(fit_m3$draws(format = "array"),
+           pars = c("beta_chorus", "beta_verse", "beta_sd",
+                    "gamma_chorus", "sigma_artist", "sigma_genre"),
+           facet_args = list(ncol = 2)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "M3: Segment — Key Parameters")
+```
+
+```{r traceplots-m4}
+#| label: traceplots-m4
+#| fig-height: 12
+#| eval: !expr '!is.null(fit_m4)'
+
+mcmc_trace(fit_m4$draws(format = "array"),
+           pars = c("beta_lmc", "beta_slope", "beta_curve",
+                    "beta_change", "beta_sd", "gamma_lmc"),
+           facet_args = list(ncol = 2)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "M4: Timeline — Key Parameters")
+```
+
+
+# Posterior Summaries
+
+```{r posterior-table}
+#| label: posterior-table
+
+extract_post <- function(fit, params, label) {
+  draws <- fit$draws(format = "df")
+  map_dfr(params, function(p) {
+    x <- draws[[p]]
+    if (is.null(x)) return(NULL)
+    tibble(model = label, parameter = p,
+           median = median(x), q5 = quantile(x, 0.05),
+           q95 = quantile(x, 0.95), p_pos = mean(x > 0))
+  }) %>% mutate(across(where(is.numeric), ~round(., 4)))
+}
+
+# Focus on substantive parameters (exclude controls for readability)
+key_params_by_model <- list(
+  "M1: MuLan Track" = c("beta_lmc", "gamma_lmc", "gamma_intercept",
+                         "sigma_artist", "sigma_genre", "phi"),
+  "M2: CLAP Track"  = c("beta_lmc", "gamma_lmc", "gamma_intercept",
+                         "sigma_artist", "sigma_genre", "phi"),
+  "M3: Segment"     = c("beta_chorus", "beta_verse", "beta_sd",
+                         "gamma_chorus", "chorus_vs_verse",
+                         "sigma_artist", "sigma_genre", "phi"),
+  "M4: Timeline"    = c("beta_lmc", "beta_slope", "beta_curve",
+                         "beta_change", "beta_sd", "gamma_lmc",
+                         "sigma_artist[1]", "sigma_artist[2]",
+                         "sigma_genre", "phi", "Rho_artist[1,2]")
+)
+
+post_all <- map2_dfr(models, names(models), function(fit, label) {
+  extract_post(fit, key_params_by_model[[label]], label)
+})
+
+kable(post_all,
+      caption = "Posterior summaries — substantive parameters",
+      col.names = c("Model", "Parameter", "Median", "5%", "95%", "P(>0)")) %>%
+  kable_styling(full_width = FALSE, font_size = 11) %>%
+  pack_rows(index = table(post_all$model))
+```
+
+
+## Mood tag control effects
+
+```{r mood-controls}
+#| label: mood-controls
+#| fig-height: 6
+
+mood_params <- c("beta_happy", "beta_sad", "beta_relaxed",
+                 "beta_aggressive", "beta_party", "beta_dance", "beta_voice")
+mood_labels <- c(
+  "beta_happy" = "Happy", "beta_sad" = "Sad", "beta_relaxed" = "Relaxed",
+  "beta_aggressive" = "Aggressive", "beta_party" = "Party",
+  "beta_dance" = "Danceability", "beta_voice" = "Voice/Instrumental"
+)
+
+# Show controls from M1 as representative
+draws_m1 <- fit_m1$draws(format = "df")
+
+draws_m1 %>%
+  select(all_of(mood_params)) %>%
+  pivot_longer(everything(), names_to = "param", values_to = "value") %>%
+  mutate(param = recode(param, !!!mood_labels)) %>%
+  ggplot(aes(x = value, y = reorder(param, value), fill = after_stat(x > 0))) +
+  stat_halfeye(.width = c(0.8, 0.95), point_interval = median_hdi) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey30") +
+  scale_fill_manual(values = c("FALSE" = "#E76F51", "TRUE" = "#2A9D8F"),
+                    guide = "none") +
+  labs(title = "Essentia Mood Tag Effects on Popularity (M1)",
+       subtitle = "Bars = 80% and 95% credible intervals",
+       x = "Coefficient (logit scale)", y = NULL)
+```
+
+
+# LMC Effects
+
+## Cross-model comparison
+
+```{r lmc-forest}
+#| label: lmc-forest
+#| fig-height: 5
+
+lmc_coefs <- bind_rows(
+  fit_m1$summary("beta_lmc") %>% mutate(model = "M1: MuLan\n(track)"),
+  fit_m2$summary("beta_lmc") %>% mutate(model = "M2: CLAP\n(track)"),
+  if (!is.null(fit_m3))
+    fit_m3$summary("beta_chorus") %>% mutate(model = "M3: Segment\n(chorus)"),
+  if (!is.null(fit_m4))
+    fit_m4$summary("beta_lmc") %>% mutate(model = "M4: Timeline\n(mean LMC)")
+)
+
+ggplot(lmc_coefs, aes(x = median, y = reorder(model, median))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = q5, xmax = q95),
+                 height = 0.3, linewidth = 1.2, color = "#2A9D8F") +
+  geom_point(size = 5, color = "#2A9D8F") +
+  labs(title = "LMC Effect on Popularity Across Models",
+       subtitle = "Posterior median + 90% CI (logit scale)",
+       x = "β (logit scale)", y = NULL)
+```
+
+
+## Orientation moderation
+
+```{r orientation-mod}
+#| label: orientation-mod
+#| fig-height: 5
+
+mod_draws <- bind_rows(
+  tibble(model = "M1: MuLan Track",
+         gamma = fit_m1$draws(format = "df")$gamma_lmc),
+  tibble(model = "M2: CLAP Track",
+         gamma = fit_m2$draws(format = "df")$gamma_lmc),
+  if (!is.null(fit_m3)) tibble(
+    model = "M3: Segment",
+    gamma = fit_m3$draws(format = "df")$gamma_chorus),
+  if (!is.null(fit_m4)) tibble(
+    model = "M4: Timeline",
+    gamma = fit_m4$draws(format = "df")$gamma_lmc)
+)
+
+ggplot(mod_draws, aes(x = gamma, fill = model)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_fill_brewer(palette = "Set2", name = "Model") +
+  labs(title = "Orientation × LMC Moderation Across Models",
+       subtitle = "Positive γ = narrative artists show stronger LMC-popularity link",
+       x = "γ (logit scale)", y = "Density")
+```
+
+
+## Genre effects
+
+```{r genre-effects}
+#| label: genre-effects
+#| fig-height: 6
+
+# Extract genre random intercepts from M1
+n_genre <- length(unique(master$genre_cluster[!is.na(master$genre_cluster) &
+                                               master$genre_cluster != "Other"]))
+genre_params <- paste0("alpha_genre[", 1:n_genre, "]")
+
+genre_levels <- sort(unique(master$genre_cluster[master$genre_cluster != "Other"]))
+
+genre_post <- fit_m1$summary(variables = genre_params) %>%
+  mutate(genre = genre_levels[as.integer(str_extract(variable, "\\d+"))]) %>%
+  filter(!is.na(genre))
+
+ggplot(genre_post, aes(x = median, y = reorder(genre, median),
+                       color = genre)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = q5, xmax = q95),
+                 height = 0.3, linewidth = 1.2) +
+  geom_point(size = 4) +
+  scale_color_manual(values = GENRE_COLS, guide = "none") +
+  labs(title = "Genre Random Intercepts (M1)",
+       subtitle = "Deviation from grand mean popularity (logit scale). 90% CI.",
+       x = "α_genre (logit scale)", y = NULL)
+```
+
+
+## Artist effects
+
+```{r artist-effects}
+#| label: artist-effects
+#| fig-height: 10
+
+# Build artist lookup from data used for M1
+df_m1_artists <- master %>%
+  filter(!is.na(lmc_mulan), !is.na(popularity)) %>%
+  distinct(artist_code, orientation, genre_cluster) %>%
+  arrange(artist_code)
+
+n_art <- nrow(df_m1_artists)
+artist_params <- paste0("alpha_artist[", 1:n_art, "]")
+
+artist_post <- fit_m1$summary(variables = artist_params) %>%
+  mutate(idx = as.integer(str_extract(variable, "\\d+"))) %>%
+  left_join(
+    df_m1_artists %>% mutate(idx = row_number()),
+    by = "idx"
+  ) %>%
+  filter(!is.na(artist_code))
+
+ggplot(artist_post, aes(x = median, y = reorder(artist_code, median),
+                        color = orientation)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = q5, xmax = q95),
+                 height = 0.3, linewidth = 0.7, alpha = 0.7) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = ORIENT_COLS, name = "Orientation") +
+  labs(title = "Artist Random Intercepts (M1)",
+       subtitle = "Partial-pooled baseline popularity. 90% CI.",
+       x = "α_artist (logit scale)", y = NULL) +
+  theme(axis.text.y = element_text(size = 7))
+```
+
+
+## M3: Chorus vs. Verse
+
+```{r chorus-vs-verse}
+#| label: chorus-vs-verse
+#| fig-height: 5
+#| eval: !expr '!is.null(fit_m3)'
+
+m3_draws <- fit_m3$draws(format = "df")
+
+tibble(
+  `Chorus LMC (β_chorus)` = m3_draws$beta_chorus,
+  `Verse LMC (β_verse)`   = m3_draws$beta_verse,
+  `Chorus − Verse (Δ)`    = m3_draws$chorus_vs_verse
+) %>%
+  pivot_longer(everything(), names_to = "param", values_to = "value") %>%
+  ggplot(aes(x = value, y = param, fill = after_stat(x > 0))) +
+  stat_halfeye(.width = c(0.8, 0.95), point_interval = median_hdi) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_fill_manual(values = c("FALSE" = "#E76F51", "TRUE" = "#2A9D8F"),
+                    guide = "none") +
+  labs(title = "M3: Chorus vs. Verse Congruence Effects",
+       subtitle = paste0("P(Chorus > Verse) = ",
+                        round(mean(m3_draws$chorus_vs_verse > 0), 3)),
+       x = "Coefficient (logit scale)", y = NULL)
+```
+
+
+## M4: Trajectory features
+
+```{r trajectory-features}
+#| label: trajectory-features
+#| fig-height: 7
+#| eval: !expr '!is.null(fit_m4)'
+
+m4_labels <- c(
+  "beta_lmc"    = "Mean LMC\n(level)",
+  "beta_slope"  = "Slope\n(builds over song?)",
+  "beta_curve"  = "Curvature\n(mid-song peak?)",
+  "beta_change" = "Early→Late\n(strong finish?)",
+  "beta_sd"     = "Consistency\n(stable LMC?)"
+)
+
+fit_m4$draws(format = "df") %>%
+  select(all_of(names(m4_labels))) %>%
+  pivot_longer(everything(), names_to = "param", values_to = "value") %>%
+  mutate(param = recode(param, !!!m4_labels)) %>%
+  ggplot(aes(x = value, y = param, fill = after_stat(x > 0))) +
+  stat_halfeye(.width = c(0.8, 0.95), point_interval = median_hdi) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_fill_manual(values = c("FALSE" = "#E76F51", "TRUE" = "#2A9D8F"),
+                    guide = "none") +
+  labs(title = "M4: Trajectory Feature Effects on Popularity",
+       subtitle = "How the dynamics of congruence over a song predict streaming",
+       x = "Coefficient (logit scale)", y = NULL)
+```
+
+
+# Posterior Predictive Checks
+
+```{r ppc}
+#| label: ppc
+#| fig-height: 10
+
+# NOTE: PPC requires the actual y data used for each model.
+# Build these from master. Adjust if your data prep differs.
+
+ppc_plot <- function(fit, label) {
+  y_rep <- fit$draws("y_rep", format = "matrix")
+  # Use the first N values from draws as proxy for y_obs
+  # In practice, replace with the actual y vector you used
+  N <- ncol(y_rep)
+  y_obs <- fit$summary("mu")$median[1:N]  # approximate
+
+  ppc_dens_overlay(y_obs, y_rep[sample(nrow(y_rep), 80), ]) +
+    labs(title = label, x = "Popularity (scaled)")
+}
+
+# Display M1 and M2 PPCs (adjust for M3/M4 availability)
+(ppc_plot(fit_m1, "M1: MuLan Track") +
+ ppc_plot(fit_m2, "M2: CLAP Track")) /
+  (if (!is.null(fit_m3)) ppc_plot(fit_m3, "M3: Segment") else plot_spacer()) +
+  (if (!is.null(fit_m4)) ppc_plot(fit_m4, "M4: Timeline") else plot_spacer()) +
+  plot_annotation(title = "Posterior Predictive Checks",
+                  subtitle = "Black = observed; blue = posterior draws")
+```
+
+::: {.callout-note}
+**Note for the analyst:** Replace the approximate `y_obs` in the PPC
+function with the actual `pop_scaled` vector from each model's data
+preparation step for correct calibration.
+:::
+
+
+# Model Comparison (LOO-CV)
+
+```{r loo-cv}
+#| label: loo-cv
+
+compute_loo_safe <- function(fit, label) {
+  ll <- fit$draws("log_lik", format = "matrix")
+  res <- loo(ll, cores = 4)
+  N   <- ncol(ll)
+  tibble(
+    Model     = label,
+    N         = N,
+    ELPD      = res$estimates["elpd_loo", "Estimate"],
+    SE        = res$estimates["elpd_loo", "SE"],
+    p_eff     = res$estimates["p_loo", "Estimate"],
+    LOOIC     = res$estimates["looic", "Estimate"],
+    ELPD_song = res$estimates["elpd_loo", "Estimate"] / N,
+    k_bad     = sum(res$pointwise[, "influence_pareto_k"] > 0.7)
+  )
+}
+
+loo_table <- map2_dfr(models, names(models), compute_loo_safe) %>%
+  mutate(across(where(is.numeric), ~round(., 3))) %>%
+  arrange(desc(ELPD_song))
+
+kable(loo_table,
+      caption = "LOO-CV comparison (higher ELPD = better)",
+      col.names = c("Model", "N", "ELPD", "SE", "p_eff", "LOOIC",
+                    "ELPD/song", "Pareto-k > 0.7")) %>%
+  kable_styling(full_width = FALSE)
+```
+
+```{r loo-viz}
+#| label: loo-viz
+#| fig-height: 4
+
+ggplot(loo_table, aes(x = ELPD_song, y = reorder(Model, ELPD_song))) +
+  geom_errorbarh(aes(xmin = ELPD_song - 2 * SE / N,
+                     xmax = ELPD_song + 2 * SE / N),
+                 height = 0.3, linewidth = 1.2, color = "#2A9D8F") +
+  geom_point(size = 5, color = "#2A9D8F") +
+  labs(title = "LOO-CV Model Comparison",
+       subtitle = "ELPD per song ± 2 SE. Higher = better out-of-sample prediction.",
+       x = "ELPD per song", y = NULL)
+```
+
+::: {.callout-important}
+**Interpretation note:** The model with the highest ELPD/song has the
+best out-of-sample predictive performance. If M3 or M4 substantially
+outperform M1/M2, it means temporal or structural information about
+congruence carries unique predictive signal beyond the aggregate level.
+If M1 wins, the simpler measure is sufficient and the added complexity
+of segment or timeline decomposition is overfitting noise.
+
+<!-- FILL IN: After examining the LOO comparison above, write 2-3
+     paragraphs interpreting which model won and what that implies
+     for the LMC construct. -->
+:::
+
+
+# Simulation-Based Parameter Recovery
+
+This section validates the M3 (segment) model's ability to recover known
+parameter values from simulated data calibrated to the observed sample.
+
+```{r simulation-setup}
+#| label: simulation-setup
+#| code-fold: false
+
+# ── Simulation parameters (calibrated to actual data) ────────────────────────
+N_SIM      <- 50     # number of simulated datasets
+N_SONGS    <- 350    # approximate song count
+N_ARTISTS  <- 30     # approximate artist count
+N_GENRES   <- 4
+SONGS_PER_ARTIST <- ceiling(N_SONGS / N_ARTISTS)
+
+# "True" parameter values — based on reasonable priors and pilot results
+TRUE_PARAMS <- list(
+  mu_global       = -0.1,     # logit(0.475) ≈ slightly below midpoint
+  beta_chorus     =  0.15,    # moderate positive chorus LMC effect
+  beta_verse      =  0.05,    # weaker verse effect
+  beta_sd         = -0.10,    # consistency helps (negative SD → higher pop)
+  beta_age        = -0.20,    # older songs less popular
+  gamma_intercept =  0.10,    # narrative slightly higher baseline
+  gamma_chorus    =  0.12,    # narrative amplifies chorus effect
+  beta_happy      =  0.08,
+  beta_sad        = -0.05,
+  beta_relaxed    = -0.03,
+  beta_aggressive =  0.02,
+  beta_party      =  0.10,
+  beta_dance      =  0.06,
+  beta_voice      =  0.00,
+  sigma_artist    =  0.35,    # moderate artist heterogeneity
+  sigma_genre     =  0.20,    # modest genre heterogeneity
+  phi             =  35.0     # moderate Beta precision
+)
+
+# Compile the model once
+sim_model <- cmdstan_model(file.path(BAYES_DIR, "model_segment.stan"))
+```
+
+```{r run-simulations}
+#| label: run-simulations
+#| cache: true
+
+set.seed(123)
+
+simulate_one_dataset <- function(params) {
+  # ── Generate group structure ───────────────────────────────────────────
+  artist_ids <- rep(1:N_ARTISTS, each = SONGS_PER_ARTIST)[1:N_SONGS]
+  genre_ids  <- rep(1:N_GENRES, length.out = N_ARTISTS)[artist_ids]
+  orientation <- rep(rbinom(N_ARTISTS, 1, 0.5), each = SONGS_PER_ARTIST)[1:N_SONGS]
+  orient_artist <- orientation[!duplicated(artist_ids)]
+
+  # ── Simulate random effects ───────────────────────────────────────────
+  alpha_artist_re <- rnorm(N_ARTISTS, 0, params$sigma_artist)
+  alpha_genre     <- rnorm(N_GENRES,  0, params$sigma_genre)
+
+  # ── Simulate predictors (z-scored in population) ───────────────────────
+  chorus_z  <- rnorm(N_SONGS)
+  verse_z   <- rnorm(N_SONGS)
+  sd_z      <- rnorm(N_SONGS)
+  age_z     <- rnorm(N_SONGS)
+  happy_z   <- rnorm(N_SONGS)
+  sad_z     <- rnorm(N_SONGS)
+  relaxed_z <- rnorm(N_SONGS)
+  aggr_z    <- rnorm(N_SONGS)
+  party_z   <- rnorm(N_SONGS)
+  dance_z   <- rnorm(N_SONGS)
+  voice_z   <- rnorm(N_SONGS)
+
+  # ── Compute linear predictor ──────────────────────────────────────────
+  eta <- numeric(N_SONGS)
+  for (i in seq_len(N_SONGS)) {
+    j <- artist_ids[i]
+    g <- genre_ids[i]
+    eta[i] <- (params$mu_global +
+               params$gamma_intercept * orient_artist[j] +
+               alpha_artist_re[j]) +
+              alpha_genre[g] +
+              (params$beta_chorus + params$gamma_chorus * orient_artist[j]) * chorus_z[i] +
+              params$beta_verse * verse_z[i] +
+              params$beta_sd * sd_z[i] +
+              params$beta_age * age_z[i] +
+              params$beta_happy * happy_z[i] +
+              params$beta_sad * sad_z[i] +
+              params$beta_relaxed * relaxed_z[i] +
+              params$beta_aggressive * aggr_z[i] +
+              params$beta_party * party_z[i] +
+              params$beta_dance * dance_z[i] +
+              params$beta_voice * voice_z[i]
+  }
+
+  mu  <- plogis(eta)
+  mu  <- pmin(pmax(mu, 0.001), 0.999)
+  a   <- mu * params$phi
+  b   <- (1 - mu) * params$phi
+  y   <- rbeta(N_SONGS, a, b)
+  y   <- pmin(pmax(y, 0.001), 0.999)
+
+  list(
+    N = N_SONGS, N_artist = N_ARTISTS, N_genre = N_GENRES,
+    y = y,
+    chorus_lmc_z = chorus_z, verse_lmc_z = verse_z, lmc_sd_z = sd_z,
+    song_age_z = age_z,
+    mood_happy_z = happy_z, mood_sad_z = sad_z, mood_relaxed_z = relaxed_z,
+    mood_aggressive_z = aggr_z, mood_party_z = party_z,
+    danceability_z = dance_z, voice_instr_z = voice_z,
+    artist_id = artist_ids, genre_id = genre_ids,
+    orientation = orient_artist
+  )
+}
+
+# ── Run simulations ──────────────────────────────────────────────────────
+recovery_params <- c("beta_chorus", "beta_verse", "beta_sd",
+                     "gamma_chorus", "gamma_intercept",
+                     "sigma_artist", "sigma_genre", "phi")
+
+sim_results <- map_dfr(seq_len(N_SIM), function(s) {
+  if (s %% 10 == 0) message(sprintf("  Simulation %d / %d", s, N_SIM))
+
+  sim_data <- simulate_one_dataset(TRUE_PARAMS)
+
+  fit <- tryCatch(
+    sim_model$sample(
+      data            = sim_data,
+      chains          = 2,         # fewer chains for speed
+      parallel_chains = 2,
+      iter_warmup     = 500,
+      iter_sampling   = 500,
+      adapt_delta     = 0.90,
+      refresh         = 0,
+      show_messages   = FALSE
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(fit)) return(NULL)
+
+  summ <- fit$summary(variables = recovery_params)
+  summ %>%
+    select(variable, mean, median, q5, q95) %>%
+    mutate(sim_id = s)
+}, .progress = TRUE)
+```
+
+```{r recovery-plots}
+#| label: recovery-plots
+#| fig-height: 10
+
+if (nrow(sim_results) > 0) {
+
+  # Add true values
+  true_df <- tibble(
+    variable = recovery_params,
+    true_value = c(
+      TRUE_PARAMS$beta_chorus, TRUE_PARAMS$beta_verse, TRUE_PARAMS$beta_sd,
+      TRUE_PARAMS$gamma_chorus, TRUE_PARAMS$gamma_intercept,
+      TRUE_PARAMS$sigma_artist, TRUE_PARAMS$sigma_genre, TRUE_PARAMS$phi
+    )
+  )
+
+  recovery_df <- sim_results %>%
+    left_join(true_df, by = "variable") %>%
+    mutate(
+      covers_true = q5 <= true_value & q95 >= true_value,
+      bias        = median - true_value
+    )
+
+  # ── Coverage table ─────────────────────────────────────────────────────
+  coverage <- recovery_df %>%
+    group_by(variable) %>%
+    summarise(
+      true_val     = first(true_value),
+      mean_est     = round(mean(median), 4),
+      mean_bias    = round(mean(bias), 4),
+      rmse         = round(sqrt(mean(bias^2)), 4),
+      coverage_90  = round(mean(covers_true), 3),
+      .groups      = "drop"
+    )
+
+  kable(coverage,
+        caption = "Parameter recovery: 50 simulated datasets",
+        col.names = c("Parameter", "True", "Mean Est.", "Mean Bias",
+                      "RMSE", "90% Coverage")) %>%
+    kable_styling(full_width = FALSE)
+
+  # ── Recovery scatter plots ──────────────────────────────────────────────
+  recovery_df %>%
+    ggplot(aes(x = true_value, y = median)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                color = "grey50") +
+    geom_errorbar(aes(ymin = q5, ymax = q95),
+                  width = 0, alpha = 0.3, color = "#2A9D8F") +
+    geom_point(aes(color = covers_true), size = 1.5, alpha = 0.7) +
+    scale_color_manual(values = c("TRUE" = "#2A9D8F", "FALSE" = "#E63946"),
+                       name = "90% CI covers true value") +
+    facet_wrap(~variable, scales = "free") +
+    labs(title = "Simulation-Based Parameter Recovery (M3 Structure)",
+         subtitle = sprintf("N = %d songs, %d artists, %d sims. Dashed = identity.",
+                           N_SONGS, N_ARTISTS, N_SIM),
+         x = "True value", y = "Posterior median")
+
+} else {
+  cat("Simulation results empty — check for fitting errors.\n")
+}
+```
+
+::: {.callout-note}
+**Interpreting recovery:** 90% coverage near 0.90 means the credible
+intervals are calibrated. Coverage well below 0.90 indicates the model
+is overconfident (CIs too narrow). Mean bias near zero means the point
+estimates are unbiased. RMSE captures both bias and variance.
+:::
+
+
+# Conclusions
+
+::: {.callout-important}
+## Sections to fill in after examining results
+
+1. **Best model selection:** Based on the LOO comparison table above,
+   identify which model has the highest ELPD/song. Discuss whether the
+   improvement over the track-level baseline (M1) is substantively
+   meaningful (ELPD difference > 2 SE suggests reliable improvement).
+
+2. **LMC effect interpretation:** Using the best model's posterior for
+   the primary LMC coefficient, report the median effect, 90% CI, and
+   P(β > 0). Convert to the popularity-point scale using the marginal
+   effect generated quantity. A useful frame: "A 1-SD increase in LMC
+   is associated with approximately X popularity points [90% CI: L, U]."
+
+3. **Orientation moderation:** Report whether γ_lmc (or γ_chorus for M3)
+   is credibly different from zero. If P(γ > 0) > 0.90, the evidence
+   supports the hypothesis that narrative-forward artists benefit more
+   from lyric-music congruence.
+
+4. **Structural insights (M3/M4):** If M3 won, report the chorus-vs-verse
+   contrast and its posterior probability. If M4 won, identify which
+   trajectory feature (slope, curvature, change, consistency) carries
+   the most predictive signal and discuss its theoretical implications.
+
+5. **Limitations:** The simulation recovery shows the model can recover
+   known parameters at the observed sample size, but the causal DAG
+   (see `dag_specification.R`) identifies unblockable backdoor paths
+   through unobserved artistic intent. Discuss within-artist variation
+   as the strongest source of identification.
+:::

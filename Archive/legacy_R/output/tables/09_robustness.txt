@@ -1,0 +1,8 @@
+       part                       term statistic      Main   Log(Y) No Explicit
+1 estimates                (Intercept)  estimate 63.405*** 4.112***   61.943***
+2 estimates                (Intercept) std.error   (4.342)  (0.082)     (4.691)
+3 estimates                lmc_mulan_c  estimate     0.742    0.005       1.075
+4 estimates                lmc_mulan_c std.error   (1.006)  (0.022)     (1.207)
+5 estimates SD (Intercept artist_code)  estimate    14.798    0.277      14.256
+6 estimates          SD (Observations)  estimate    10.175    0.223      10.452
+7       gof                   Num.Obs.                 173      173         116

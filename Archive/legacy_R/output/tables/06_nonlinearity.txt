@@ -1,0 +1,16 @@
+        part                                term statistic    Linear Quadratic  Quad+Mod
+1  estimates                         (Intercept)  estimate 63.405*** 63.485*** 66.924***
+2  estimates                         (Intercept) std.error   (4.342)   (4.379)   (6.038)
+3  estimates                         lmc_mulan_c  estimate     0.742     0.735     2.426
+4  estimates                         lmc_mulan_c std.error   (1.006)   (1.007)   (2.310)
+5  estimates                        lmc_mulan_c2  estimate              -0.080     0.766
+6  estimates                        lmc_mulan_c2 std.error             (0.569)   (1.125)
+7  estimates                orientationnarrative  estimate                        -6.419
+8  estimates                orientationnarrative std.error                       (8.531)
+9  estimates  lmc_mulan_c × orientationnarrative  estimate                        -1.162
+10 estimates  lmc_mulan_c × orientationnarrative std.error                       (3.042)
+11 estimates lmc_mulan_c2 × orientationnarrative  estimate                        -1.424
+12 estimates lmc_mulan_c2 × orientationnarrative std.error                       (1.715)
+13 estimates          SD (Intercept artist_code)  estimate    14.798    14.801    14.361
+14 estimates                   SD (Observations)  estimate    10.175    10.174    10.152
+15       gof                            Num.Obs.                 173       173       173

@@ -1,0 +1,4 @@
+               lmc_mulan lmc_clap lmc_mert_sbert
+lmc_mulan          1.000    0.138         -0.106
+lmc_clap           0.138    1.000         -0.110
+lmc_mert_sbert    -0.106   -0.110          1.000
