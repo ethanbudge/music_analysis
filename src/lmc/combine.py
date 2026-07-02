@@ -16,16 +16,60 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
-from .config import RESULTS_DIR, MOOD_COLUMNS
+from .config import RESULTS_DIR, MOOD_COLUMNS, MERT
 from . import db as projdb
+from . import mert as mert_mod
 
 logger = logging.getLogger(__name__)
 
 
 def _read(conn, sql) -> pd.DataFrame:
     return pd.read_sql_query(sql, conn)
+
+
+def _add_mert_pcs(master: pd.DataFrame) -> pd.DataFrame:
+    """PCA-reduce cached MERT vectors → mert_pc01..K columns (valid off-LMC controls)."""
+    vecs = mert_mod.load_vectors(master["track_id"].tolist())
+    if len(vecs) < MERT["pca_k"] + 1:
+        logger.info("MERT: %d vectors cached (<%d) — skipping PCA controls.",
+                    len(vecs), MERT["pca_k"] + 1)
+        return master
+    try:
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+    except Exception as e:                                     # noqa: BLE001
+        logger.warning("scikit-learn unavailable (%s) — skipping MERT PCA.", e)
+        return master
+    ids = [t for t in master["track_id"] if t in vecs]
+    M = np.stack([vecs[t] for t in ids])
+    Z = StandardScaler().fit_transform(M)
+    K = min(MERT["pca_k"], Z.shape[1], Z.shape[0] - 1)
+    pcs = PCA(n_components=K, random_state=0).fit_transform(Z)
+    cols = [f"mert_pc{j + 1:02d}" for j in range(K)]
+    pc_df = pd.DataFrame(pcs, columns=cols); pc_df["track_id"] = ids
+    logger.info("MERT: wrote %d PCA controls for %d songs.", K, len(ids))
+    return master.merge(pc_df, on="track_id", how="left")
+
+
+def _merge_genre(gen: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
+    """Prefer the ensemble genre (genre table) over the Spotify-only popularity.genre."""
+    if gen.empty:
+        master["genre_source"] = "spotify"        # provenance for the legacy path
+        master["genre_confidence"] = pd.NA
+        return master
+    gen = gen[["track_id", "genre", "genre_source", "genre_confidence", "orientation"]]
+    master = master.merge(gen, on="track_id", how="left", suffixes=("_spotify", ""))
+    # Fall back to the Spotify recovery where the ensemble has no row.
+    for col in ("genre", "orientation"):
+        sp = f"{col}_spotify"
+        if sp in master.columns:
+            master[col] = master[col].fillna(master[sp])
+            master = master.drop(columns=[sp])
+    master["genre_source"] = master["genre_source"].fillna("spotify")
+    return master
 
 
 def build_master() -> dict:
@@ -38,6 +82,7 @@ def build_master() -> dict:
         lmc   = _read(conn, "SELECT * FROM lmc")
         lines = _read(conn, "SELECT * FROM lmc_lines")
         audio = _read(conn, "SELECT track_id, view_count, like_count, comment_count, channel, is_topic FROM audio")
+        gen   = _read(conn, "SELECT * FROM genre")
 
     if songs.empty:
         logger.warning("No songs in corpus — nothing to combine.")
@@ -63,6 +108,10 @@ def build_master() -> dict:
         lmc["col"] = lmc["model"] + "_" + lmc["method"]
         wide = lmc.pivot_table(index="track_id", columns="col", values="value", aggfunc="first")
         master = master.merge(wide.reset_index(), on="track_id", how="left")
+
+    # Ensemble genre (preferred over Spotify-only) + MERT PCA control features.
+    master = _merge_genre(gen, master)
+    master = _add_mert_pcs(master)
 
     # Derived: song age in years from release date (relative to today).
     if "release_date" in master.columns:

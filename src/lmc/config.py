@@ -44,9 +44,12 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 YOUTUBE_API_KEY       = os.getenv("YOUTUBE_API_KEY",       "")   # optional
 LASTFM_API_KEY        = os.getenv("LASTFM_API_KEY",        "")   # optional
 
-# ─── Embedding models ────────────────────────────────────────────────────────────
-# Only the two joint audio-text models are retained; the MERT+SBERT late-fusion
-# baseline from the original study has been removed.
+# ─── Joint audio-text embedding models (used to compute LMC) ─────────────────────
+# Two joint models. CLAP is loaded via the official `laion_clap` package (the HF
+# `transformers` ClapModel silently failed to load this checkpoint's projection
+# weights — see git history / MODEL_NOTES). Point LMC_CLAP_CKPT at the downloaded
+# music checkpoint (music_audioset_epoch_15_esc_90.14.pt); otherwise laion_clap
+# downloads its default general checkpoint (not music-specialised).
 MODELS = {
     "mulan": {
         "name":     "MuQ-MuLan",
@@ -56,12 +59,58 @@ MODELS = {
     },
     "clap": {
         "name":     "LAION-CLAP (music)",
-        "hf_id":    "laion/larger_clap_music",
+        "amodel":   "HTSAT-base",                 # audio backbone for laion_clap
+        "ckpt":     "",                           # filled by _find_clap_ckpt() below
+        "enable_fusion": False,
         "audio_sr": 48_000,
         "dim":      512,
         "chunk_s":  10.0,    # CLAP works on ~10 s windows; long audio is chunked
     },
 }
+
+
+def _find_clap_ckpt() -> str:
+    """Locate the LAION-CLAP *music* checkpoint without re-downloading.
+
+    Order: LMC_CLAP_CKPT env var → the shared HuggingFace cache (where
+    `lukewys/laion_clap` lands, reused across conda envs) → "" (then _CLAP falls
+    back to laion_clap's default general checkpoint with a warning).
+    """
+    env = os.getenv("LMC_CLAP_CKPT")
+    if env:
+        return env
+    pat = str(Path.home() / ".cache/huggingface/hub/models--lukewys--laion_clap"
+              / "snapshots/*/music_audioset_*.pt")
+    hits = sorted(glob.glob(pat))
+    return hits[-1] if hits else ""
+
+
+MODELS["clap"]["ckpt"] = _find_clap_ckpt()
+
+# ─── MERT audio controls (replaces / augments the librosa mood proxies) ──────────
+# MERT is an audio-only self-supervised representation. Because it is a DIFFERENT
+# representation than the MuLan/CLAP space that LMC lives in, its principal
+# components are valid *off-LMC-path* controls (they soak up production/era/genre
+# nuisance variance without partialling out LMC's own inputs — see MODEL_NOTES §4.5).
+MERT = {
+    "name":     "MERT-v1-330M",
+    "hf_id":    "m-a-p/MERT-v1-330M",
+    "audio_sr": 24_000,
+    "dim":      1024,
+    "chunk_s":  10.0,        # embed in ~10 s windows + average — a whole song in one
+                            #   forward pass blows the Apple-MPS buffer cap (>11 GiB).
+    "pca_k":    10,          # number of MERT principal components used as controls
+}
+MERT_DIR = EMBEDDINGS_DIR / "mert"   # cached per-song MERT vectors (<track_id>.npy)
+
+# ─── Genre ensemble ──────────────────────────────────────────────────────────────
+# Coarse genre clusters (the modelling vocabulary). Genre is recovered by a cascade
+# (see genre.py): Spotify artist tags → MusicBrainz/Discogs tags → zero-shot from
+# the MuLan/CLAP embedding, recording the source and a confidence for each song.
+GENRE_VOCAB = ["hip-hop", "country", "folk", "electronic", "rock", "r&b", "latin", "pop"]
+GENRE_ZEROSHOT_MODEL  = "mulan"   # which joint embedding backs zero-shot genre
+GENRE_ZEROSHOT_PROMPT = "This is a {genre} song."
+MUSICBRAINZ_APP = ("lmc-research", "0.1", "ethanbudge2000@gmail.com")  # MB API user-agent
 
 # ─── Line-level audio context windows ────────────────────────────────────────────
 # For each synced lyric line we embed the audio under several padding regimes.
@@ -109,7 +158,7 @@ LMC_METHODS = (
 
 def ensure_dirs() -> None:
     """Create all output directories (safe to call repeatedly)."""
-    for d in (DATA_DIR, RESULTS_DIR, AUDIO_DIR, EMBEDDINGS_DIR):
+    for d in (DATA_DIR, RESULTS_DIR, AUDIO_DIR, EMBEDDINGS_DIR, MERT_DIR):
         d.mkdir(parents=True, exist_ok=True)
     for key in MODELS:
         (EMBEDDINGS_DIR / key).mkdir(parents=True, exist_ok=True)

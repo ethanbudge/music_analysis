@@ -113,6 +113,20 @@ CREATE TABLE IF NOT EXISTS chorus (
     fetched_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS mert (
+    track_id INTEGER PRIMARY KEY REFERENCES songs(track_id),
+    path     TEXT,                          -- cached <track_id>.npy (1024-d MERT vector)
+    dim      INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS genre (
+    track_id         INTEGER PRIMARY KEY REFERENCES songs(track_id),
+    genre            TEXT,                  -- coarse cluster (config.GENRE_VOCAB) or 'unknown'
+    genre_source     TEXT,                  -- 'spotify' | 'musicbrainz' | 'zeroshot' | 'unknown'
+    genre_confidence REAL,
+    orientation      TEXT                   -- narrative | production | unknown
+);
+
 CREATE TABLE IF NOT EXISTS lmc_lines (
     track_id     INTEGER REFERENCES songs(track_id),
     model        TEXT,

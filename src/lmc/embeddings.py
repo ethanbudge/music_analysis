@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from .config import MODELS, EMBEDDINGS_DIR, CONTEXT_WINDOWS
+from .config import MODELS, MERT, EMBEDDINGS_DIR, CONTEXT_WINDOWS
 from .utils import (get_device, model_to_device, split_text_chunks,
                     parse_lrc, lrc_to_plaintext, embedding_path,
                     save_song_embeddings)
@@ -70,18 +70,40 @@ class _MuLan:
 
 
 class _CLAP:
+    """LAION-CLAP via the official `laion_clap` package.
+
+    We use laion_clap rather than transformers' ClapModel because that path
+    silently failed to load this checkpoint's projection / logit-scale weights
+    (matched audio-text cosine ≈ 0). laion_clap loads the original checkpoints
+    directly. Point config MODELS['clap']['ckpt'] (env LMC_CLAP_CKPT) at the
+    music checkpoint; otherwise the package's default checkpoint is downloaded.
+    """
     sr = MODELS["clap"]["audio_sr"]
     dim = MODELS["clap"]["dim"]
     chunk_s = MODELS["clap"]["chunk_s"]
 
     def __init__(self, device):
         import torch
-        from transformers import ClapModel, ClapProcessor
+        import laion_clap
         self.torch = torch
         self.device = device
-        logger.info("Loading LAION-CLAP on %s…", device)
-        self.processor = ClapProcessor.from_pretrained(MODELS["clap"]["hf_id"])
-        self.model = model_to_device(ClapModel.from_pretrained(MODELS["clap"]["hf_id"]), device)
+        cfg = MODELS["clap"]
+        # The audio backbone MUST match the checkpoint: the music checkpoint is
+        # HTSAT-base (1024-d), but laion_clap's default download is HTSAT-tiny
+        # (768-d). Using the wrong one => a size-mismatch crash on load. So only
+        # request HTSAT-base when a (music) checkpoint is actually provided.
+        amodel = cfg["amodel"] if cfg["ckpt"] else "HTSAT-tiny"
+        logger.info("Loading LAION-CLAP (%s) on %s…", amodel, device)
+        self.model = laion_clap.CLAP_Module(
+            enable_fusion=cfg["enable_fusion"], amodel=amodel, device=device)
+        if cfg["ckpt"]:
+            self.model.load_ckpt(ckpt=cfg["ckpt"])           # music checkpoint
+        else:
+            logger.warning("LMC_CLAP_CKPT unset — loading laion_clap's default GENERAL "
+                           "(non-music) HTSAT-tiny checkpoint. For the music model, download "
+                           "music_audioset_epoch_15_esc_90.14.pt and set LMC_CLAP_CKPT.")
+            self.model.load_ckpt()
+        self.model.eval()
 
     def _chunks(self, wav):
         n = int(self.chunk_s * self.sr)
@@ -95,12 +117,13 @@ class _CLAP:
         try:
             vecs = []
             for ch in self._chunks(wav):
-                inp = self.processor(audios=ch, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+                x = np.ascontiguousarray(ch, dtype=np.float32)[None, :]   # [1, samples]
                 with self.torch.no_grad():
-                    vecs.append(self.model.get_audio_features(**inp).squeeze(0).cpu().numpy())
+                    v = self.model.get_audio_embedding_from_data(x=x, use_tensor=False)
+                vecs.append(np.asarray(v).squeeze(0))
             return np.stack(vecs).mean(axis=0) if vecs else None
         except Exception as e:                                 # noqa: BLE001
-            logger.debug("  clap audio embed failed: %s", e)
+            logger.warning("  clap audio embed failed: %s", e)
             return None
 
     def embed_text(self, text: str) -> np.ndarray | None:
@@ -108,12 +131,60 @@ class _CLAP:
         if not chunks:
             return None
         try:
-            inp = self.processor(text=chunks, return_tensors="pt", padding=True).to(self.device)
             with self.torch.no_grad():
-                vecs = self.model.get_text_features(**inp).cpu().numpy()
-            return vecs.mean(axis=0)
+                # laion_clap expects >= 2 texts; pad with a copy if needed.
+                q = chunks if len(chunks) >= 2 else chunks * 2
+                v = self.model.get_text_embedding(q, use_tensor=False)
+            return np.asarray(v)[:len(chunks)].mean(axis=0)
         except Exception as e:                                 # noqa: BLE001
-            logger.debug("  clap text embed failed: %s", e)
+            logger.warning("  clap text embed failed: %s", e)
+            return None
+
+
+class _MERT:
+    """MERT-v1-330M audio-only encoder → one 1024-d vector per song.
+
+    Mean-pools the hidden states over time and over layers. Used only for control
+    features (no text tower), so it exposes embed_audio() and is driven by mert.py.
+    """
+    sr = MERT["audio_sr"]
+    dim = MERT["dim"]
+    chunk_s = MERT["chunk_s"]
+
+    def __init__(self, device):
+        import torch
+        from transformers import AutoModel, Wav2Vec2FeatureExtractor
+        self.torch = torch
+        self.device = device
+        logger.info("Loading %s on %s…", MERT["name"], device)
+        self.processor = Wav2Vec2FeatureExtractor.from_pretrained(MERT["hf_id"], trust_remote_code=True)
+        self.model = model_to_device(
+            AutoModel.from_pretrained(MERT["hf_id"], trust_remote_code=True), device).eval()
+
+    def _chunks(self, wav):
+        # MERT operates on short clips; a whole song in one pass overflows the MPS
+        # buffer cap. Split into ~chunk_s windows, drop sub-0.5 s tails.
+        n = int(self.chunk_s * self.sr)
+        if len(wav) <= n:
+            return [wav]
+        return [wav[i:i + n] for i in range(0, len(wav), n) if len(wav[i:i + n]) >= int(0.5 * self.sr)]
+
+    def _embed_chunk(self, ch):
+        inp = self.processor(ch, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+        with self.torch.no_grad():
+            out = self.model(**inp, output_hidden_states=True)
+        # hidden_states: tuple(L+1) of [1, T, 1024] → mean over time then layers.
+        hs = self.torch.stack(out.hidden_states, dim=0).squeeze(1)       # [L+1, T, 1024]
+        return hs.mean(dim=1).mean(dim=0).cpu().numpy()                  # [1024]
+
+    def embed_audio(self, wav: np.ndarray) -> np.ndarray | None:
+        if wav is None or len(wav) < int(0.1 * self.sr):
+            return None
+        try:
+            vecs = [self._embed_chunk(ch) for ch in self._chunks(wav)]   # average over chunks
+            return np.stack(vecs).mean(axis=0) if vecs else None
+        except Exception as e:                                 # noqa: BLE001
+            logger.warning("  mert embed failed: %s", e)
             return None
 
 
@@ -221,6 +292,13 @@ def embed_pending(model_key: str, limit: int | None = None,
             flags = chorus_mod.detect_chorus(lines)
 
         bundle = _build_bundle(emb, wav, sr, total_dur, lines, flags)
+        # Guard against silently caching a dead bundle (e.g. an embedder API break):
+        # if the song-level audio AND text vectors are both all-zero, the embedder
+        # failed for this song — skip rather than poison the cache.
+        if not (np.any(bundle.get("audio_full")) and np.any(bundle.get("text_full"))):
+            logger.warning("  [%s] all-zero embedding for %s — embedder failed, skipping.",
+                           model_key, tid)
+            continue
         path = embedding_path(EMBEDDINGS_DIR, model_key, tid)
         save_song_embeddings(path, bundle)
         with projdb.connect() as conn:

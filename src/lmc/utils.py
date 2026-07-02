@@ -147,7 +147,9 @@ def save_song_embeddings(path, arrays: dict[str, np.ndarray]) -> None:
     """Atomically save a song's embedding bundle to .npz."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".npz.tmp")
+    # np.savez_compressed appends ".npz" unless the name already ends in it, so the
+    # temp name must end in ".npz" or the file numpy writes won't match `tmp`.
+    tmp = path.with_suffix(".tmp.npz")
     np.savez_compressed(tmp, **arrays)
     os.replace(tmp, path)
 

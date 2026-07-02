@@ -59,24 +59,34 @@ popularity) is cached and never recomputed.
 ```
 .
 ├── src/lmc/                  Python package (the pipeline)
-│   ├── config.py             paths, models, context windows, sampling filters
+│   ├── config.py             paths, models (MuLan/CLAP/MERT), windows, filters
 │   ├── db.py                 project SQLite schema + progress queries
 │   ├── lrclib.py             setup()/sample() from the LRCLIB dump
 │   ├── audio.py              yt-dlp official-audio download + YouTube metrics
-│   ├── popularity.py         Spotify / Deezer / Last.fm + genre recovery
-│   ├── mood.py               librosa mood proxies
+│   ├── popularity.py         Spotify / Deezer / Last.fm + genre keyword map
+│   ├── genre.py              ensemble genre: Spotify → MusicBrainz → zero-shot
+│   ├── mood.py               librosa mood proxies (control option)
+│   ├── mert.py               MERT-v1-330M per-song vectors (control option)
 │   ├── chorus.py             chorus detection from repeated synced lines
-│   ├── embeddings.py         MuLan + CLAP, cached per-song .npz bundles
+│   ├── embeddings.py         MuLan + CLAP (laion_clap) + MERT encoders
 │   ├── alignment.py          LMC: song / line-windows / chorus vs non-chorus
-│   ├── combine.py            → results/master_results.csv (+ line-level table)
+│   ├── combine.py            → master_results.csv (+ MERT PCA, ensemble genre)
 │   └── utils.py              device, LRC parsing, cosine, embedding I/O
 ├── notebooks/pipeline.ipynb  resumable end-to-end driver
-├── analysis/summary_stats.R  quick descriptives + figures
-├── stan/
-│   ├── model_track.stan      single-measure LMC → popularity
-│   ├── model_segment.stan    chorus vs non-chorus → popularity
-│   ├── model_timeline.stan   line-level LMC dynamics → popularity
-│   └── run_models.R          cmdstanr runner with sample_corpus(df, N, seed)
+├── analysis/
+│   ├── summary_stats.R       quick descriptives + figures
+│   ├── report_helpers.R      fit → labelled summaries (controls, genre, β(t))
+│   └── lmc_report.qmd        rendered results report (per embedding × controls)
+├── stan/                     v4 model family (generic controls + functional)
+│   ├── model_track_v4.stan        single-measure LMC → popularity
+│   ├── model_segment_v4.stan      chorus vs non-chorus → popularity
+│   ├── model_curve_v4.stan        scalar-on-function: ∫β(t)·LMC(t)  (curvature)
+│   ├── model_segment_curve_v4.stan section-aware β_chorus(t)/β_nonchorus(t)
+│   ├── model_line_curve_v4.stan   one-stage line-level joint model (experimental)
+│   ├── run_models.R          cmdstanr runner; controls toggle (mood/mert/both)
+│   ├── evaluate_models.R     family-agnostic diagnostics sweep
+│   ├── MODEL_NOTES.md        why the parameterization is what it is
+│   └── archive/              superseded v2 / v3 models (provenance only)
 ├── data/                     LRCLIB dump, audio, embeddings, project.db  (gitignored)
 ├── results/                  master_results.csv, lmc_lines.csv           (gitignored)
 ├── archive/                  the original first-year codebase (preserved, unused)
@@ -159,14 +169,17 @@ Stop and rerun any time — each stage processes only what is still outstanding.
 ### Statistics & modeling
 
 ```bash
-Rscript analysis/summary_stats.R          # descriptives + figures
-Rscript stan/run_models.R mulan 500 1     # fit on a random N=500 sample (seed 1)
+Rscript analysis/summary_stats.R              # descriptives + figures
+Rscript stan/run_models.R both 0 42 mert      # embeddings, N(0=all), seed, controls
+Rscript stan/evaluate_models.R                # diagnostics + LOO sweep
+quarto render analysis/lmc_report.qmd -P embedding:mulan -P controls:mert
 ```
 
-`run_models.R` fits the **track** model once per LMC measure (song-wide and each
-line window) and compares them by **LOO**, then fits the **segment** and
-**timeline** models. `sample_corpus(df, N, seed)` lets you fit on any random
-subset of whatever you've gathered.
+`run_models.R` fits, on one **shared corpus** (so LOO is comparable), the **track**
+model once per LMC measure plus the **segment / curvature / segment+curvature**
+trajectory models, for each embedding. The **control block is a toggle** —
+`controls ∈ {mood, mert, both}` (default MERT) — so you can compare control sets.
+`sample_corpus(df, N, seed)` and `build_corpus()` let you fit on any subset.
 
 ---
 

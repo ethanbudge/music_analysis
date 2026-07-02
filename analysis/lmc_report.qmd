@@ -1,0 +1,300 @@
+---
+title: "Lyric–Music Congruence → Streaming Popularity"
+subtitle: "MuLan vs CLAP — direct comparison (v4 models)"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    fig-width: 8
+    fig-height: 5
+    theme: cosmo
+    embed-resources: true
+params:
+  embeddings: ["mulan", "clap"]
+  controls: "mert"
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup}
+#| include: false
+suppressPackageStartupMessages(source(here::here("analysis", "report_helpers.R")))
+library(knitr)
+CTRL  <- params$controls
+WANT  <- params$embeddings
+
+MEASURES <- c("song", "line_exact", "line_buf1", "line_buf5", "line_buf10")
+TRAJ     <- c("segment", "curve", "segcurve", "polycurve", "hiercurve", "linecurve")
+tags_for <- function(e) c(paste0("track_", e, "_", MEASURES), paste0(TRAJ, "_", e))
+all_tags <- unlist(lapply(WANT, tags_for))
+all_tags <- all_tags[file.exists(file.path(OUTPUT, paste0(all_tags, ".rds")))]
+EMBS     <- intersect(WANT, unique(tag_embedding(all_tags)))   # embeddings actually fit
+
+corpus_df   <- tryCatch(build_corpus(EMBS, controls = CTRL)$df, error = function(e) NULL)
+N_corpus    <- if (!is.null(corpus_df)) nrow(corpus_df) else NA
+genre_names <- if (!is.null(corpus_df)) levels(factor(corpus_df$genre)) else NULL
+
+M <- setNames(lapply(all_tags, extract_fit, corpus_df = corpus_df, genre_names = genre_names), all_tags)
+M <- M[!vapply(M, is.null, logical(1))]
+
+# Per-model accessors as named-by-embedding lists (for cross-embedding views).
+by_kind  <- function(prefix) setNames(lapply(EMBS, function(e) M[[paste0(prefix, "_", e)]]), EMBS)
+song_M   <- setNames(lapply(EMBS, function(e) M[[paste0("track_", e, "_song")]]), EMBS)
+seg_M    <- by_kind("segment"); curve_M <- by_kind("curve"); segc_M <- by_kind("segcurve")
+poly_M   <- by_kind("polycurve"); hier_M <- by_kind("hiercurve")
+
+base_name <- function(m) switch(m$family,
+  track = sprintf("Track · %s", MEASURE_LABEL[[m$measure]]),
+  segment = "Segment (chorus vs verse)", curve = "Curvature · β(t)",
+  segcurve = "Segment + curvature", polycurve = "Curvature · genre quadratic",
+  hiercurve = "Curvature · genre spline", linecurve = "Line-level (experimental)")
+nice_name <- function(m) sprintf("%s · %s", toupper(m$embedding), base_name(m))
+
+loo_list <- Filter(Negate(is.null), lapply(M, function(m) m$loo))
+names(loo_list) <- vapply(M[names(loo_list)], nice_name, character(1))
+diag_tbl  <- bind_rows(lapply(M, function(m) m$diag))
+ctrl_used <- unique(na.omit(vapply(M, function(m) m$controls %||% NA_character_, character(1))))
+emb_lab   <- paste(toupper(EMBS), collapse = " vs ")
+```
+
+> **What this is.** A **direct MuLan-vs-CLAP comparison** of whether multimodal
+> Lyric–Music Congruence (LMC) predicts Spotify popularity, with **every model fit
+> on the same `r N_corpus` songs** (one shared corpus), so the two embeddings and
+> all models are ranked on identical data. Hierarchical Beta regression, genre
+> hierarchy, orientation moderator, genre-varying precision, and a control block
+> (**`r paste(ctrl_used, collapse=", ")`**). β(t) is the effect of congruence at
+> song position t; all effects are on the **logit scale**.
+
+# Executive summary
+
+```{r exec}
+#| results: asis
+if (length(M) == 0) cat("_No fits found. Run `Rscript stan/run_models.R both 0 42 mert`._") else {
+best <- names(which.max(vapply(loo_list, function(l) l$estimates["elpd_loo","Estimate"], 0)))
+seg_tab <- effect_across(seg_M, "chorus_vs_nonchorus")
+cat(sprintf("
+- **Embeddings compared:** %s, on the same %s songs (LOO directly comparable).
+- **Sampler health:** min E-BFMI **%.2f**, max R-hat **%.3f**, **%d** divergences across %d fits.
+- **Best model overall (LOO):** **%s**.
+- **Verse vs chorus congruence (chorus − non-chorus):** %s.
+- Every section below is split by embedding so you can read MuLan against CLAP directly.
+",
+emb_lab, N_corpus, min(diag_tbl$ebfmi_min), max(diag_tbl$rhat_max), sum(diag_tbl$n_div),
+nrow(diag_tbl), best,
+paste(sprintf("%s %s", toupper(seg_tab$embedding), fmt_ci(seg_tab$median, seg_tab$q05, seg_tab$q95, seg_tab$p_pos)),
+      collapse="; ")))
+}
+```
+
+# 1 · Sampler health (both embeddings)
+
+```{r diag-table}
+diag_tbl %>%
+  transmute(Model = vapply(M, base_name, character(1)), Embedding = toupper(embedding),
+            Divergences = n_div, `Min E-BFMI` = round(ebfmi_min, 2),
+            `Max R-hat` = round(rhat_max, 3), `Min bulk ESS` = round(ess_bulk_min)) %>%
+  arrange(Model, Embedding) %>% kable(align = "llrrrr")
+```
+
+# 2 · Which model & embedding predict best? (LOO)
+
+All fits share the same `r N_corpus` songs, so this single table ranks **every model
+× embedding** directly. `Δ elpd` is relative to the top row; `|Δ| < ~2·SE` ⇒
+indistinguishable.
+
+```{r loo-all}
+if (length(loo_list) > 1) {
+  loo::loo_compare(loo_list) %>% as.data.frame() %>% rownames_to_column("Model × Embedding") %>%
+    transmute(`Model × Embedding`, `Δ elpd` = round(elpd_diff, 1), `SE Δ` = round(se_diff, 1),
+              elpd = round(elpd_loo, 1)) %>%
+    kable(align = "lrrr")
+}
+```
+
+```{r loo-by-embedding}
+# Head-to-head: for each model type, MuLan vs CLAP elpd on the shared corpus.
+if (length(EMBS) > 1) {
+  model_tag  <- function(k, e) if (k %in% MEASURES) paste0("track_", e, "_", k) else paste0(k, "_", e)
+  model_name <- function(k) if (k %in% MEASURES) sprintf("Track · %s", MEASURE_LABEL[[k]]) else
+    base_name(list(family = k, measure = NA))
+  kinds <- c(MEASURES, "segment", "curve", "segcurve", "polycurve", "hiercurve")
+  rows <- lapply(kinds, function(k) {
+    elpd <- function(e) { m <- M[[model_tag(k, e)]]; if (!is.null(m$loo)) m$loo$estimates["elpd_loo","Estimate"] else NA }
+    tibble(Model = model_name(k), mulan = elpd("mulan"), clap = elpd("clap"))
+  })
+  bind_rows(rows) %>% filter(!is.na(mulan) | !is.na(clap)) %>%
+    transmute(Model, `MuLan elpd` = round(mulan,1), `CLAP elpd` = round(clap,1),
+              `MuLan − CLAP` = round(mulan - clap, 1)) %>%
+    kable(align = "lrrr", caption = "Per-model embedding head-to-head (positive ⇒ MuLan predicts better).")
+}
+```
+
+# 3 · Overall LMC effect by measure — MuLan vs CLAP
+
+```{r lmc-measure}
+d <- bind_rows(lapply(EMBS, function(e) {
+  tm <- M[names(M) %in% paste0("track_", e, "_", MEASURES)]
+  bind_rows(lapply(tm, function(m) m$summ %>% filter(param == "beta_lmc") %>%
+    transmute(Measure = MEASURE_LABEL[[m$measure]], embedding = e, median, p_pos)))
+}))
+d %>% mutate(cell = sprintf("%+.3f (%.0f%%)", median, 100*p_pos)) %>%
+  select(Measure, embedding, cell) %>%
+  pivot_wider(names_from = embedding, values_from = cell) %>%
+  arrange(match(Measure, MEASURE_LABEL)) %>%
+  kable(align = "lcc", caption = "Overall LMC slope: median (P>0), by measure and embedding.")
+```
+
+```{r lmc-measure-plot, fig.height=3.6}
+#| fig-cap: "Overall LMC slope (median ± 90% CI) by measure, MuLan vs CLAP."
+d2 <- bind_rows(lapply(EMBS, function(e) {
+  tm <- M[names(M) %in% paste0("track_", e, "_", MEASURES)]
+  bind_rows(lapply(tm, function(m) m$summ %>% filter(param == "beta_lmc") %>%
+    transmute(Measure = factor(MEASURE_LABEL[[m$measure]], levels = MEASURE_LABEL),
+              embedding = e, median, q05, q95)))
+}))
+ggplot(d2, aes(median, Measure, colour = embedding)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+  geom_pointrange(aes(xmin = q05, xmax = q95), position = position_dodge(width = 0.4)) +
+  scale_colour_manual(values = EMB_COLOURS) +
+  labs(x = "LMC slope (logit)", y = NULL, colour = NULL) + theme_report()
+```
+
+# 4 · Segment: verse vs chorus — MuLan vs CLAP
+
+The key structural result. Does congruence in the **verses** out-predict congruence
+in the **chorus**, and does that replicate across embeddings?
+
+```{r segment-compare}
+segparams <- c("beta_chorus","beta_nonchorus","chorus_vs_nonchorus","gamma_chorus")
+bind_rows(lapply(segparams, function(p) {
+  e <- effect_across(seg_M, p)
+  tibble(Parameter = e$label[1],
+         !!!setNames(lapply(EMBS, function(em) {
+           r <- e %>% filter(embedding == em)
+           if (nrow(r)) fmt_ci(r$median, r$q05, r$q95, r$p_pos) else NA }), toupper(EMBS)))
+})) %>% kable(align = "lcc", caption = "Chorus vs non-chorus congruence: median [90% CI] P>0.")
+```
+
+```{r segment-plot, fig.height=3.4}
+#| fig-cap: "Chorus vs non-chorus LMC slope, MuLan vs CLAP."
+d3 <- bind_rows(lapply(c("beta_chorus","beta_nonchorus"), function(p) effect_across(seg_M, p) %>% mutate(param = p)))
+ggplot(d3, aes(median, label, colour = embedding)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+  geom_pointrange(aes(xmin = q05, xmax = q95), position = position_dodge(width = 0.4)) +
+  scale_colour_manual(values = EMB_COLOURS) +
+  labs(x = "Slope (logit)", y = NULL, colour = NULL) + theme_report()
+```
+
+# 5 · Congruence trajectory β(t) — MuLan vs CLAP
+
+```{r beta-t-curve, fig.height=3.8}
+#| fig-cap: "Curvature model β(t), MuLan vs CLAP (band = 90% CI)."
+plot_beta_t_compare(curve_M)
+```
+
+```{r beta-t-seg, fig.height=3.8}
+#| fig-cap: "Segment+curvature: β(t) for chorus vs non-chorus regions, MuLan vs CLAP."
+plot_beta_t_compare(segc_M)
+```
+
+## 5a · Congruence effect by genre, β_g(t) — MuLan vs CLAP
+
+```{r beta-genre, fig.height=6}
+#| fig-cap: "Genre-varying quadratic congruence effect β_g(t) per genre, MuLan vs CLAP."
+plot_beta_t_genre_compare(poly_M)
+```
+
+# 6 · Song-wide covariates — MuLan vs CLAP
+
+```{r cov-compare}
+keyp <- c("beta_lmc", "gamma_lmc", "gamma_intercept")
+ktab <- bind_rows(lapply(keyp, function(p) {
+  e <- effect_across(song_M, p)
+  tibble(Parameter = e$label[1],
+         !!!setNames(lapply(EMBS, function(em) {
+           r <- e %>% filter(embedding == em)
+           if (nrow(r)) fmt_ci(r$median, r$q05, r$q95, r$p_pos) else NA }), toupper(EMBS)))
+}))
+kable(ktab, align = "lcc", caption = "Key song-wide effects (LMC + orientation moderators), median [90% CI] P>0.")
+```
+
+```{r cov-full}
+#| fig-height: 6
+#| fig-cap: "Full song-wide covariate + control effects (median, 90% CI), MuLan vs CLAP."
+d4 <- bind_rows(lapply(EMBS, function(e) {
+  m <- song_M[[e]]; if (is.null(m)) return(NULL)
+  bind_rows(m$summ %>% filter(group == "effect", param != "mu_global"),
+            m$ctrl_tbl) %>% transmute(label, median, q05, q95, embedding = e)
+}))
+d4 <- d4 %>% mutate(label = factor(label, levels = rev(unique(label))))
+ggplot(d4, aes(median, label, colour = embedding)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+  geom_pointrange(aes(xmin = q05, xmax = q95), position = position_dodge(width = 0.5), size = 0.3) +
+  scale_colour_manual(values = EMB_COLOURS) +
+  labs(x = "Effect (logit)", y = NULL, colour = NULL) + theme_report()
+```
+
+# 7 · Genre provenance (ensemble recovery)
+
+```{r genre-source}
+#| results: asis
+msrc <- tryCatch(load_master(), error = function(e) NULL)
+if (!is.null(msrc) && "genre_source" %in% names(msrc)) {
+  print(kable(msrc %>% count(genre_source, name = "songs") %>% arrange(desc(songs)),
+              caption = "How each song's genre was recovered (Spotify → MusicBrainz → zero-shot)."))
+} else cat("_No genre_source column — re-run genre.recover_pending() + combine.build_master()._")
+```
+
+# 8 · Posterior predictive checks (both embeddings)
+
+```{r ppc, fig.height=5}
+#| fig-cap: "Observed popularity (dark) vs posterior-predicted draws (light), per model × embedding."
+ppc_M <- Filter(function(m) !is.null(m$ppc), M)
+if (length(ppc_M)) {
+  ppc_df <- bind_rows(lapply(ppc_M, function(m) {
+    obs <- tibble(value = m$ppc$y, kind = "observed", draw = 0L)
+    rep <- as_tibble(t(m$ppc$yrep)) %>% mutate(.id = row_number()) %>%
+      pivot_longer(-.id, names_to = "draw", values_to = "value") %>%
+      mutate(kind = "replicated", draw = as.integer(factor(draw)))
+    bind_rows(obs, rep) %>% mutate(model = base_name(m), embedding = m$embedding)
+  }))
+  # keep the panel readable: the trajectory-comparison models only
+  keep <- c("Segment (chorus vs verse)", "Curvature · β(t)", "Curvature · genre quadratic")
+  ggplot(filter(ppc_df, model %in% keep)) +
+    geom_density(data = ~filter(.x, kind == "replicated"),
+                 aes(value, group = interaction(draw, embedding)), colour = "#c9d7ee", linewidth = 0.15) +
+    geom_density(data = ~filter(.x, kind == "observed"), aes(value, colour = embedding), linewidth = 0.9) +
+    scale_colour_manual(values = EMB_COLOURS) +
+    facet_grid(embedding ~ model) +
+    labs(x = "Spotify popularity / 100 (boundary-adjusted)", y = NULL, colour = NULL) + theme_report()
+}
+```
+
+# 9 · Next steps
+
+```{r next-steps}
+#| results: asis
+cat(sprintf("
+- **Read §2 first:** the single LOO table ranks every model × embedding on the same
+  %s songs. If MuLan and CLAP sit within ~2·SE of each other, the embedding choice
+  doesn't change the predictive story.
+- **§4 is the robustness check:** the verse>chorus result should hold in *both*
+  embeddings to be trusted.
+- **Control sets:** re-fit with `controls=mood` / `both` and re-render to see whether
+  MERT vs mood changes the LMC estimate (this report uses **%s**).
+- **Sample size:** at N≈%s several effects are directional but modest; CIs tighten
+  with more songs.
+", N_corpus, paste(ctrl_used, collapse=", "), N_corpus))
+```
+
+---
+
+*Rendered from `analysis/lmc_report.qmd` — fits both embeddings by default.
+Re-fit with `Rscript stan/run_models.R both 0 42 mert`; single-embedding view via
+`quarto render analysis/lmc_report.qmd -P embeddings:mulan`.*
