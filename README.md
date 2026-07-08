@@ -203,6 +203,195 @@ window, position_pct, is_chorus, lmc`) for the timeline analysis.
 
 ---
 
+## Generative arm — controlled LMC stimuli (`src/lmcgen`)
+
+Where the observational arm *measures* LMC on real songs, the generative arm
+*manufactures* stimuli with LMC under experimental control, to feed a downstream
+respondent study on liking / repeat-listening.
+
+**Design.** Eight original, clean two-line **hooks** — one per Plutchik high-intensity
+emotion (ecstasy, admiration, terror, amazement, grief, loathing, rage, vigilance) —
+are each set to eight musical emotions, giving an **8 × 8 grid of 64 hooks**. Lyric
+content is held fixed down each column; musical emotion is held fixed across each row.
+The diagonal is *congruent* (lyric emotion = music emotion); off-diagonal cells are
+*incongruent* by degree, so LMC varies systematically by construction.
+
+**One genre, one voice (v2).** To avoid confounding musical emotion with *genre* (the
+original design used a different genre per emotion — rage=metal, grief=ambient — so
+emotion and genre were collinear, and sparse genres mumbled the lyrics), every cell is
+now **90s alternative rock with a fixed lead voice**; emotion is varied *within* the
+genre via tempo, mode, dynamics and intensity (`emotions.py`: `GENRE_BASE` +
+`VOICE_BLURB` + per-emotion `emotion_style`). Hooks are short and repeated so the
+vocal renders the words cleanly.
+
+**Generation.** Music is generated locally with **ACE-Step 1.5** (base model, Apple
+Silicon). ACE-Step conditions on *text* (a caption + lyrics) and scalar metadata
+(bpm, key), **not** on a raw target embedding — so each musical emotion is a
+caption / bpm / key recipe. The 5 Hz LM planner is disabled so our explicit emotion
+metadata is used verbatim; `guidance_scale` is raised to ~9 for tighter lyric
+adherence.
+
+**Lyric-intelligibility screening.** Because the experiment needs the sung lyrics to
+be *exactly* right and ACE-Step doesn't guarantee that, each cell is generated as
+**best-of-N takes**: every take is transcribed with Whisper (`asr.py`, faster-whisper)
+and scored for word error rate (WER) vs. the target hook; the clearest take is kept
+and its WER is recorded as a per-clip control (`results/generation/wer.json`, `wer`
+column). Sung-audio WER is inherently high (25–50% even when clearly intelligible), so
+it's a *relative* screen and a go/no-go signal for whether ACE-Step is good enough
+versus a paid tool (Suno/Udio have clearer vocals but less control and ToS friction
+for redistributed stimuli).
+
+ACE-Step 1.5 is installed separately via `uv` (**not** `pip install acestep` — no
+such package exists) into its own environment, and is driven over its **REST API
+server** as a separate process, not imported in-process. This keeps ACE-Step's
+dependency stack (its own torch / MLX build) fully isolated from the `lmc` conda
+env's carefully pinned torch/numpy (see the CLAP/numpy history above) — the two
+never need to coexist in one interpreter. Before real generation: start the server
+(`uv run python -m acestep.api_server`, or `./start_api_server_macos.sh`, from your
+ACE-Step-1.5 clone) and call `acestep.check_server()` in the notebook, which fails
+fast with setup instructions if it isn't reachable.
+
+**Validation (three lines of evidence).**
+1. *Lexical* (model-independent) — each chorus's words vs. the eight Plutchik/NRC
+   EmoLex lexicons; the target emotion should win.
+2. *Embedding, text-side* — each chorus's MuLan text embedding vs. the eight emotion
+   anchors (independent of the audio, so no circularity).
+3. *Cross-modal LMC* — `cos(generated-audio, lyric-text)` per cell: congruent cells
+   should embed more similarly than incongruent ones (headline test), with a graded
+   correlation against *designed* congruence, plus a music manipulation check and an
+   optional independent **CLAP** validator.
+
+```
+src/lmcgen/
+  config.py     paths, ACE-Step + MuLan + ASR settings, single-genre design, DRY_RUN
+  emotions.py   8 emotions: valence/arousal, anchors, lexicon; GENRE_BASE+VOICE_BLURB
+  lyrics.py     the 8 authored 2-line hooks + rationale + lexical alignment scoring
+  mulan.py      Scorer + emotion-anchor builder (reuses lmc.embeddings)
+  acestep.py    ACE-Step 1.5 REST client (real + dry-run mock), resumable
+  asr.py        Whisper (faster-whisper) transcription + word-error-rate screening
+  pipeline.py   generate_all() [best-of-N WER] → [stop server] → validate_all()
+  analysis.py   descriptive statistics + figures (incl. WER)
+notebooks/generation_pipeline.ipynb   end-to-end driver → stats + plots
+```
+
+**Dry-run first.** `LMCGEN_DRY_RUN=1` (default) synthesises cheap emotion-dependent
+audio so the whole pipeline runs in seconds; every number is then a MOCK placeholder
+and figures are labelled as such.
+
+**Running for real on a 16 GB Mac — two memory-isolated phases.** MuLan (~a few GB)
+and ACE-Step's 3.5B model (in its server process) must **never be resident at the
+same time** on 16 GB — doing so spirals into swap and can crash the machine. The
+pipeline enforces this by splitting into two phases that don't overlap:
+
+1. **Generate** — start the ACE-Step API server with its optional LM disabled (we
+   don't use it), then run phase 1, which is a thin HTTP client (no MuLan loaded):
+   ```bash
+   cd /path/to/ACE-Step-1.5 && ACESTEP_INIT_LLM=false ./start_api_server_macos.sh
+   ```
+   ```python
+   pipeline.generate_all()      # downloads 64 clips; resumable; logs per-clip ETA
+   ```
+2. **Stop the ACE-Step server** (Ctrl-C — frees its memory), then validate:
+   ```python
+   out = pipeline.validate_all()   # loads MuLan only; embeds clips → tidy results
+   ```
+
+Recipe **tuning is off by default** (`LMCGEN_TUNE=1` to enable) because it needs both
+models at once — only turn it on where RAM is ample. `pipeline.run()` still exists as
+a single-process convenience for dry-run / big machines, but warns on 16 GB. Set
+`LMCGEN_DRY_RUN=0` and, if you changed the port, `ACESTEP_API_URL` (default
+`http://127.0.0.1:8001`); run `pipeline.clean_generated()` once when switching between
+dry-run and real. Outputs land in `data/generation/audio/`, `results/generation/*.csv`,
+and `analysis/output/figures/generation/*.png` (all gitignored).
+
+### Generation backends & the pilot (`lyria.py`, `suno.py`)
+
+The pipeline is backend-agnostic: each engine is a client exposing
+`generate(GenSpec) -> wav`, and validation (WER / VA / MuLan LMC) is shared. Besides
+the local `acestep` server there are two hosted text-to-song backends —
+**`lyria`** (Google Lyria 3 via the Gemini API / `google-genai`, `GEMINI_API_KEY`,
+lyrics passed as `[Chorus]` tags in the prompt, cleanest research licensing) and
+**`suno`** (Suno v5.5 via a third-party REST provider, `SUNO_API_KEY`; best lyric
+fidelity, but a *granted* commercial licence — verify it covers research + stimulus
+sharing). No hosted API accepts a raw emotion embedding, so emotion is set via the
+text recipes and *targeted/selected* by embedding distance to the emotion anchor.
+`pipeline.pilot(backends=("lyria","suno"), emotions=(…))` generates the same hooks on
+two backends and compares lyric WER + audio valence/arousal vs. the design target
+(`results/generation/pilot_comparison.csv`) so you can pick one on evidence.
+
+### SVS route — controlled singing-voice synthesis (`src/lmcsvs`)
+
+The ACE-Step run failed the experiment's hard requirements: lyrics weren't sung
+verbatim or intelligibly (fair WER ~0.73, 27% of clips had no intelligible vocal), the
+voice drifted, and the requested per-emotion tempo was ignored (measured BPM didn't
+track requested, corr ≈ 0.23). Text-to-song models are stochastic black boxes — exactly
+the wrong tool when you need *exact lyrics + one fixed voice + reproducibility*.
+
+**Singing-voice synthesis inverts this:** we *specify* the performance — exact notes,
+exact lyrics, one fixed voice — so lyrics and voice are guaranteed by construction and
+only the musical emotion is manipulated. `lmcsvs` does everything up to the vocal render,
+headlessly and deterministically:
+
+```
+src/lmcsvs/
+  config.py     paths, fixed-voice + emotion set (reuses lmcgen emotions/hooks)
+  syllables.py  hook → per-note syllables (pyphen, with a naive fallback)
+  melody.py     per-emotion melody: valence/arousal → mode, tempo, register, rhythm, contour
+  score.py      assemble hook_L on melody_M → an engine-agnostic Score
+  musicxml.py   Score → MusicXML (notes + lyrics + key + tempo)
+  pipeline.py   export every cell → data/svs/scores/<L>__<M>.musicxml
+  diffsinger.py headless render path: Score → .ds → OpenVPI DiffSinger inference
+  validate.py   rendered wavs → the same WER / valence-arousal harness as lmcgen
+notebooks/svs_pipeline.ipynb
+```
+
+**Two render paths.** (a) **Synthesizer V Studio 2 Pro / ACE Studio** — import the
+MusicXML (Pro edition; File → Import), assign one fixed voice, batch-render. (b)
+**Headless DiffSinger** (`diffsinger.py`) — fully scriptable from Python: `export_ds()`
+writes `.ds` scores, `render()` shells out to a locally-installed OpenVPI DiffSinger +
+English voicebank (set the `DIFFSINGER_*` env vars; `pip install g2p_en` for ARPABET).
+English DiffSinger banks use a bank-specific phoneme dictionary, so verify one `.ds`
+against your bank — importing the MusicXML into **OpenUtau** (free, matching DIFFS-EN
+phonemizer, renders DiffSinger directly) is both the verification and a GUI fallback.
+
+Workflow: `pipeline.export_scores()` writes 64 (or N²) MusicXML files → import them into
+**Synthesizer V Studio 2 Pro** or **ACE Studio**, assign **one fixed voice**, batch-render
+to `data/svs/audio/<L>__<M>.wav` → `validate.validate()` scores WER (should be ~0, since
+the lyrics are sung by construction) and valence/arousal. The user chose a **controlled
+voice** and **melody varied per emotion**; the melody encodes emotion on its strong axes
+(tempo + mode exact per emotion; register tracks arousal). Instrumental backing is a
+planned next stage.
+
+> **Caveat carried by design.** Music renders valence/arousal strongly (ecstasy,
+> grief, terror, rage separate cleanly) but *admiration/trust*, *vigilance*,
+> *amazement/surprise* and *loathing/disgust* have weaker musical signatures and tend
+> to blur in the MuLan checks — hence each emotion also carries valence/arousal
+> coordinates as an interpretable, continuous fallback.
+
+> **KNOWN ISSUE — MuLan text-tower lyric alignment (open, project-wide, not just
+> this arm).** In a dry-run validation, MuLan's text tower correctly matched only
+> 4/8 choruses to their target Plutchik emotion anchor; every miss stayed within the
+> right *valence* band (e.g. terror/grief → loathing), never crossed it. Root cause:
+> MuLan's text tower is trained on music *descriptions/tags* (MusicCaps-style), not
+> lyrics — raw lyric text is out-of-distribution for it, and valence is a known
+> stronger signal than fine-grained emotion in this kind of embedding (also reported
+> for lyrics-only models, e.g. MoodyLyrics / Çano & Morisio 2017). This affects BOTH
+> arms of the project (any `mulan_*` column that touches lyric text in
+> `results/master_results.csv`, and the generative arm's anchor scoring), so the fix
+> should be made once, centrally, rather than patched locally in `lmcgen`. Candidate
+> fixes to evaluate (roughly cheapest → most involved): (1) prompt-ensemble the
+> anchors (many templates, averaged — a well-established CLIP-style gain) and score
+> by margin instead of raw cosine; (2) mean-center text/audio embeddings separately
+> before scoring (the "modality gap" is a known geometric offset between towers);
+> (3) add convergent, text-native lyric-emotion validators independent of MuLan —
+> NRC EmoLex / NRC-VAD lexicon scoring (already used for the lexical check) and/or a
+> GoEmotions-tuned classifier — and treat cross-method agreement as the evidence
+> rather than MuLan cosine alone; (4) a small human rating pass (the gold standard
+> every MER dataset — MoodyLyrics, DEAM, MERGE — ultimately relies on). **Deferred**
+> pending a broader pass over how MuLan is used across the whole repo.
+
+---
+
 ## Method notes & limitations
 
 - **Audio provenance.** We prefer auto-generated `"<Artist> - Topic"` channels and
@@ -218,6 +407,12 @@ window, position_pct, is_chorus, lmc`) for the timeline analysis.
   (`popularity.GENRE_MAP`). Songs without usable tags are `unknown`.
 - **Mood features** are librosa signal-processing proxies, not learned classifiers
   — fine as controls, not ground truth.
+- **MuLan text-tower lyric alignment is an open issue (project-wide).** MuLan's text
+  tower is trained on music descriptions/tags, not lyrics, and under-resolves
+  fine-grained emotion vs. valence when given raw lyric text — see the KNOWN ISSUE
+  box under "Generative arm" above for evidence and candidate fixes. Any
+  interpretation of `mulan_*` LMC columns that hinges on precise lyric emotion
+  (rather than valence/topic-level alignment) should flag this.
 
 ---
 

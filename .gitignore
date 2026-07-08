@@ -22,6 +22,7 @@ lyrics/
 # ─── Generated results (regenerable; large CSVs/figures excluded by default) ──
 results/*.csv
 results/**/*.json
+results/generation/
 analysis/output/
 stan/output/
 
