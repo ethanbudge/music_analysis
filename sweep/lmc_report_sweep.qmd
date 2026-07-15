@@ -1,0 +1,237 @@
+---
+title: "Lyric–Music Congruence → Streaming Popularity"
+subtitle: "Embedding sweep — 4 models × 3 prompts × 5 structures (60 fits, v4 models)"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    fig-width: 9
+    fig-height: 5
+    theme: cosmo
+    embed-resources: true
+params:
+  controls: "mert"
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup}
+#| include: false
+suppressPackageStartupMessages(source(here::here("sweep", "R", "report_helpers_sweep.R")))
+library(knitr)
+CTRL <- params$controls
+
+loo_tab   <- load_loo_sweep()
+corpus_df <- tryCatch(build_corpus_sweep(controls = CTRL)$df, error = function(e) NULL)
+N_corpus  <- if (!is.null(corpus_df)) nrow(corpus_df) else NA_integer_
+genre_names <- if (!is.null(corpus_df)) levels(factor(corpus_df$genre)) else NULL
+
+# Load every fit named in the LOO table (skips any missing .rds). extract_fit GCs
+# each fit after summarising, so all 60 can be read sequentially.
+tags <- loo_tab$tag[file.exists(file.path(OUTPUT, paste0(loo_tab$tag, ".rds")))]
+M <- setNames(lapply(tags, extract_fit, corpus_df = corpus_df, genre_names = genre_names), tags)
+M <- Filter(Negate(is.null), M)
+diag_tbl <- bind_rows(lapply(M, function(m) m$diag))
+
+emb_split <- function(e) { p <- strsplit(e, "_", fixed = TRUE)[[1]]; list(model = p[1], prompt = p[2]) }
+```
+
+> **What this is.** The full **model × prompt × structure sweep**: 4 embedding models
+> (MuLan, LAION-CLAP, MS-CLAP, CLaMP 3) × 3 text prompts (raw / contains / idea) = 12
+> embeddings, each fit at 5 structures (song-wide + line ±1/±5/±10 s as track models,
+> chorus/verse as a segment model) = **60 hierarchical Beta-regression fits**, all on
+> **one shared complete-case corpus of `r N_corpus` songs** so every LOO is directly
+> comparable. Controls: **`r CTRL`**. All effects are on the **logit scale**.
+
+# Executive summary
+
+```{r exec}
+#| results: asis
+if (length(M) == 0) {
+  cat("_No fits found in `sweep/output/`. Run `Rscript sweep/R/run_models_sweep.R` first._")
+} else {
+  mg <- loo_marginals(loo_tab)
+  best <- loo_tab %>% slice_max(elpd_loo, n = 1)
+  cat(sprintf("
+- **Fits:** %d of 60 present, all on the same **%s** songs (LOO directly comparable).
+- **Sampler health:** min E-BFMI **%.2f**, max R-hat **%.3f**, **%d** total divergences, worst Pareto-k count **%d** (across %d fits).
+- **Best single fit (LOO):** **%s** (%s · %s · %s), elpd **%.1f**.
+- **Best model (mean elpd):** **%s**. **Best prompt:** **%s**. **Best structure:** **%s**.
+- Read §2 for the full 60-fit ranking; §3 for the LMC effect sizes; §5 for posterior checks.
+",
+  length(M), N_corpus, min(diag_tbl$ebfmi_min), max(diag_tbl$rhat_max), sum(diag_tbl$n_div),
+  max(loo_tab$k_gt_0.7), nrow(diag_tbl),
+  best$tag, MODEL_LABEL[[best$model]], best$prompt, STRUCTURE_LABEL[[as.character(best$structure)]], best$elpd_loo,
+  MODEL_LABEL[[as.character(mg$by_model$model[1])]], mg$by_prompt$prompt[1],
+  STRUCTURE_LABEL[[as.character(mg$by_structure$structure[1])]]))
+}
+```
+
+# 1 · Sampler health (all fits)
+
+```{r diag}
+diag_tbl %>%
+  mutate(model = MODEL_LABEL[map_chr(embedding, ~emb_split(.x)$model)],
+         prompt = map_chr(embedding, ~emb_split(.x)$prompt),
+         Structure = ifelse(is.na(measure), "segment", paste0("track_", measure))) %>%
+  transmute(Model = model, Prompt = prompt,
+            Structure = STRUCTURE_LABEL[Structure], Divergences = n_div,
+            `Min E-BFMI` = round(ebfmi_min, 2), `Max R-hat` = round(rhat_max, 3),
+            `Min bulk ESS` = round(ess_bulk_min)) %>%
+  arrange(desc(Divergences), desc(`Max R-hat`)) %>%
+  head(15) %>%
+  kable(align = "lllrrrr", caption = "15 least-healthy fits (all 60 in loo_all_sweep.csv). Watch divergences > 0, R-hat > 1.01, ESS < 400.")
+```
+
+# 2 · Model comparison (LOO) — the whole grid
+
+All fits share the same `r N_corpus` songs, so a single LOO ranking is valid across
+**every** model × prompt × structure.
+
+```{r loo-heatmap, fig.height=6}
+#| fig-cap: "LOO Δelpd across all 60 fits (0 = best; more negative = worse predictively)."
+plot_loo_heatmap(loo_tab)
+```
+
+```{r loo-top}
+loo_tab %>%
+  transmute(Rank = row_number(), Model = MODEL_LABEL[model], Prompt = prompt,
+            Structure = STRUCTURE_LABEL[as.character(structure)],
+            elpd = round(elpd_loo, 1), SE = round(se, 1),
+            `p_loo` = round(p_loo, 1), `k>0.7` = k_gt_0.7) %>%
+  head(15) %>%
+  kable(align = "rlllrrrr", caption = "Top 15 fits by elpd_loo (full table: sweep/output/loo_all_sweep.csv).")
+```
+
+```{r loo-marginals}
+mg <- loo_marginals(loo_tab)
+knitr::kables(list(
+  kable(mg$by_model %>% transmute(Model = MODEL_LABEL[as.character(model)], `Mean elpd` = round(mean_elpd, 1)), align = "lr"),
+  kable(mg$by_prompt %>% transmute(Prompt = as.character(prompt), `Mean elpd` = round(mean_elpd, 1)), align = "lr"),
+  kable(mg$by_structure %>% transmute(Structure = STRUCTURE_LABEL[as.character(structure)], `Mean elpd` = round(mean_elpd, 1)), align = "lr")
+), caption = "Marginal mean elpd — which model, which prompt, which structure predicts best on average.")
+```
+
+```{r loo-compare-note}
+#| results: asis
+cat("_`Δelpd` between two fits is credible only if it exceeds ~2× its SE. The full pairwise ",
+    "`loo_compare` object is saved to `sweep/output/loo_compare_all_sweep.rds`._")
+```
+
+# 3 · How big is the LMC effect? (by structure, model, prompt)
+
+Track-model LMC slope `beta_lmc` (song-wide + line windows), and the segment
+chorus−non-chorus contrast, across the grid.
+
+```{r beta-lmc, fig.height=6}
+#| fig-cap: "Track-model LMC slope (median ± 90% CI), faceted by structure; colour = model, shape = prompt."
+track_tags <- names(M)[startsWith(names(M), "track_")]
+blmc <- map_dfr(track_tags, function(tg) {
+  m <- M[[tg]]; s <- m$summ %>% filter(param == "beta_lmc")
+  if (!nrow(s)) return(NULL)
+  sp <- emb_split(m$embedding)
+  tibble(structure = paste0("track_", m$measure), model = sp$model, prompt = sp$prompt,
+         median = s$median, q05 = s$q05, q95 = s$q95, p_pos = s$p_pos)
+})
+blmc <- blmc %>% mutate(structure = factor(STRUCTURE_LABEL[structure], levels = STRUCTURE_LABEL[STRUCTURE_LEVELS]),
+                        model = MODEL_LABEL[model])
+ggplot(blmc, aes(median, model, colour = model, shape = prompt)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+  geom_pointrange(aes(xmin = q05, xmax = q95), position = position_dodge(width = 0.6)) +
+  facet_wrap(~ structure, ncol = 2) +
+  labs(x = "LMC slope on popularity (logit)", y = NULL, colour = NULL, shape = "prompt") +
+  theme_sweep() + theme(legend.position = "bottom") + guides(colour = "none")
+```
+
+```{r seg-delta, fig.height=4.5}
+#| fig-cap: "Segment models: chorus − non-chorus congruence slope (Δ), by model and prompt."
+seg_tags <- names(M)[startsWith(names(M), "segment_")]
+segd <- map_dfr(seg_tags, function(tg) {
+  m <- M[[tg]]; s <- m$summ %>% filter(param == "chorus_vs_nonchorus")
+  if (!nrow(s)) return(NULL)
+  sp <- emb_split(m$embedding)
+  tibble(model = MODEL_LABEL[sp$model], prompt = sp$prompt,
+         median = s$median, q05 = s$q05, q95 = s$q95)
+})
+ggplot(segd, aes(median, model, colour = prompt)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+  geom_pointrange(aes(xmin = q05, xmax = q95), position = position_dodge(width = 0.5)) +
+  labs(x = "Chorus − non-chorus slope (logit; <0 ⇒ verse congruence predicts better)",
+       y = NULL, colour = "prompt") + theme_sweep() + theme(legend.position = "bottom")
+```
+
+# 4 · Best-fit spotlight
+
+The single top-LOO fit, in detail: population effects + control block, and the
+genre-varying LMC slope.
+
+```{r spotlight, fig.height=4.5}
+#| fig-cap: "Population effects and control block for the best-LOO fit (median, 90% CI)."
+best_tag <- loo_tab$tag[which.max(loo_tab$elpd_loo)]
+mb <- M[[best_tag]]
+if (!is.null(mb)) plot_effects(mb)
+```
+
+```{r spotlight-genre, fig.height=4.5}
+#| fig-cap: "Genre-varying congruence slope for the best-LOO fit (violin = posterior, point = median ± 90%)."
+if (!is.null(mb)) plot_genre_slope(mb)
+```
+
+# 5 · Posterior predictive checks
+
+Observed popularity vs. posterior-replicated draws. To stay legible across 60 fits
+we show the **best fit per structure** (swap `pick` below to inspect others).
+
+```{r ppc, fig.height=6}
+#| fig-cap: "Observed (dark) vs posterior-predicted (light) popularity — best fit per structure."
+pick <- loo_tab %>% group_by(structure) %>% slice_max(elpd_loo, n = 1) %>% ungroup()
+ppc_M <- Filter(function(m) !is.null(m$ppc), M[pick$tag])
+if (length(ppc_M)) {
+  ppc_df <- bind_rows(lapply(ppc_M, function(m) {
+    obs <- tibble(value = m$ppc$y, kind = "observed", draw = 0L)
+    rep <- as_tibble(t(m$ppc$yrep)) %>% mutate(.id = row_number()) %>%
+      pivot_longer(-.id, names_to = "draw", values_to = "value") %>%
+      mutate(kind = "replicated", draw = as.integer(factor(draw)))
+    sp <- emb_split(m$embedding)
+    lbl <- sprintf("%s\n%s · %s · %s", m$tag, MODEL_LABEL[[sp$model]], sp$prompt,
+                   STRUCTURE_LABEL[[if (is.na(m$measure)) "segment" else paste0("track_", m$measure)]])
+    bind_rows(obs, rep) %>% mutate(panel = lbl)
+  }))
+  ggplot(ppc_df) +
+    geom_density(data = ~filter(.x, kind == "replicated"),
+                 aes(value, group = draw), colour = "#c9d7ee", linewidth = 0.15) +
+    geom_density(data = ~filter(.x, kind == "observed"), aes(value), colour = "#1f6feb", linewidth = 0.9) +
+    facet_wrap(~ panel, ncol = 2) +
+    labs(x = "Spotify popularity / 100 (boundary-adjusted)", y = NULL) + theme_sweep()
+} else cat("_No PPC available — ensure the shared corpus rebuilt (build_corpus_sweep)._")
+```
+
+# 6 · Notes & next steps
+
+```{r next}
+#| results: asis
+cat(sprintf("
+- **§2 is the headline:** the 60-fit LOO grid on the same %s songs. Two fits are only
+  credibly different when Δelpd exceeds ~2× its SE.
+- **Marginals (§2):** which *model*, *prompt*, and *structure* win on average — the
+  cleanest read on whether MS-CLAP / CLaMP 3 or the caption-style prompts help.
+- **§3:** effect sizes; watch whether the sign/size of the LMC slope is stable across
+  prompts within a model (prompt-sensitivity is itself a finding).
+- **Corpus size:** the global complete-case rule means any CLaMP 3 / MS-CLAP missingness
+  shrinks N for *all* fits — check the %s-song count against the per-cell coverage in the
+  notebook's `build_master.missing_report()`.
+- Controls here are **%s**; re-run the notebook + `run_models_sweep.R` with a different
+  control set to test robustness.
+", N_corpus, N_corpus, CTRL))
+```
+
+---
+
+*Rendered from `sweep/lmc_report_sweep.qmd`. Fit the battery with
+`Rscript sweep/R/run_models_sweep.R` (4 chains × 1000+1000, MERT controls).*

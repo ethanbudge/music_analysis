@@ -33,6 +33,10 @@ transformers>=4.37.0      # MERT (m-a-p/MERT-v1-330M, trust_remote_code)
 accelerate>=0.26
 laion-clap>=1.1.6         # LAION-CLAP via the official package (NOT transformers ClapModel)
 nnAudio>=0.3.2            # MERT feature extractor dependency
+sentence-transformers>=2.2 # lmcmetrics: the NEW lyric text tower (default all-MiniLM-L6-v2)
+# Optional (lmcmetrics geometry): Gromov-Wasserstein needs POT — `pip install pot`.
+msclap>=1.3               # validation/: Microsoft CLAP (2023) spot-test model
+# validation/ CLaMP 3 is a separate cloned repo (sanderwood/clamp3); set LMCVAL_CLAMP3_REPO.
 # MuQ-MuLan: pip install git+https://github.com/OpenMuQ/MuQ.git
 #
 # CLAP music checkpoint (download once, then set LMC_CLAP_CKPT to its path):
