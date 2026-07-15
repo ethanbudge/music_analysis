@@ -23,6 +23,14 @@ lyrics/
 results/*.csv
 results/**/*.json
 results/generation/
+results/lmcmetrics/
+
+# ─── Validation sandbox (cached audio/lyrics + spot-test CSVs; regenerable) ────
+validation/data/
+validation/results/
+
+# ─── Embedding sweep (regenerable Stan fits + LOO tables) ─────────────────────
+sweep/output/
 analysis/output/
 stan/output/
 
