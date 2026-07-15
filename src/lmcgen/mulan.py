@@ -1,17 +1,15 @@
 """
-mulan.py — Joint-embedding scorer + emotion-anchor builder.
+mulan.py — Joint-embedding scorer + VA-corner anchor builder.
 
 Reuses the observational arm's embedders (`lmc.embeddings._MuLan` / `_CLAP`) so the
-generative arm scores stimuli in *exactly* the same space the main study measures
-LMC in. Everything torch/muq/laion_clap is imported lazily by those classes, so
-importing this module stays cheap until you actually build a Scorer.
-
-Two things live here:
+generative arm scores stimuli in *exactly* the same space the main study measures LMC
+in. Everything torch/muq/laion_clap is imported lazily by those classes, so importing
+this module stays cheap until you actually build a Scorer.
 
   Scorer          Wraps one loaded embedder and exposes embed_text(str) -> [D],
                   embed_audio_file(path) -> [D], and cosine helpers.
 
-  build_anchors   For each emotion, embeds its anchor prompts (emotions.py) with the
+  build_anchors   For each VA corner, embeds its anchor prompts (quadrants.py) with the
                   TEXT tower and averages them into a unit anchor vector. Because
                   MuLan/CLAP are joint spaces, the same anchor scores both lyric text
                   and generated audio. Anchors are cached to data/generation/anchors/.
@@ -21,7 +19,7 @@ import logging
 import numpy as np
 
 from .config import ANCHOR_DIR
-from . import emotions as emo
+from . import quadrants as q
 
 logger = logging.getLogger(__name__)
 
@@ -57,33 +55,33 @@ class Scorer:
 
     # ── anchors ──────────────────────────────────────────────────────────────────
     def build_anchors(self, force: bool = False) -> dict[str, np.ndarray]:
-        """Build (and cache) one unit anchor vector per emotion from its prompts."""
+        """Build (and cache) one unit anchor vector per VA corner from its prompts."""
         from lmc.utils import load_song_embeddings, save_song_embeddings
         ANCHOR_DIR.mkdir(parents=True, exist_ok=True)
         path = ANCHOR_DIR / f"anchors_{self.model_key}.npz"
         if not force and path.exists():
             cached = load_song_embeddings(path)
-            if cached and set(cached) >= set(emo.ORDER):
+            if cached and set(cached) >= set(q.ORDER):
                 logger.info("Anchors[%s]: loaded cached.", self.model_key)
-                return {name: cached[name] for name in emo.ORDER}
+                return {code: cached[code] for code in q.ORDER}
 
-        logger.info("Anchors[%s]: embedding %d emotion prompt sets…", self.model_key, len(emo.ALL))
+        logger.info("Anchors[%s]: embedding %d VA-corner prompt sets…", self.model_key, len(q.ALL))
         anchors: dict[str, np.ndarray] = {}
-        for e in emo.ALL:
-            vecs = [self.embed_text(p) for p in e.anchor_prompts]
+        for quad in q.ALL:
+            vecs = [self.embed_text(p) for p in quad.anchor_prompts]
             vecs = [v for v in vecs if v is not None]
             if not vecs:
-                raise RuntimeError(f"anchor embedding failed for {e.name} ({self.model_key})")
-            anchors[e.name] = _unit(np.mean(np.stack(vecs), axis=0))
+                raise RuntimeError(f"anchor embedding failed for {quad.code} ({self.model_key})")
+            anchors[quad.code] = _unit(np.mean(np.stack(vecs), axis=0))
         save_song_embeddings(path, anchors)
         return anchors
 
     # ── scoring ──────────────────────────────────────────────────────────────────
     def score_against_anchors(self, vec: np.ndarray,
                               anchors: dict[str, np.ndarray]) -> dict[str, float]:
-        """Cosine of `vec` against every emotion anchor (emotion -> cosine)."""
+        """Cosine of `vec` against every VA-corner anchor (corner -> cosine)."""
         from lmc.utils import cosine_sim
-        return {name: cosine_sim(vec, anchors[name]) for name in emo.ORDER}
+        return {code: cosine_sim(vec, anchors[code]) for code in q.ORDER}
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -91,7 +89,8 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return (v / n).astype(np.float32) if n else v.astype(np.float32)
 
 
-def argmax_emotion(scores: dict[str, float]) -> str:
+def argmax(scores: dict[str, float]) -> str:
+    """The corner with the highest cosine (argmax over the anchor scores)."""
     return max(scores, key=scores.get)
 
 

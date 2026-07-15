@@ -46,26 +46,17 @@ spotipy>=2.23.0
 requests>=2.31
 musicbrainzngs>=0.7.1     # MusicBrainz genre/tag lookup (genre ensemble)
 
-# ── Generative arm (lmcgen): ACE-Step client + lyric-intelligibility screening ──
-# ACE-Step 1.5 itself is NOT installed here — it runs as a separate uv-managed
-# server we reach over HTTP (see src/lmcgen/acestep.py). faster-whisper (CTranslate2,
-# CPU/int8, no torch) transcribes generated clips to score lyric word error rate.
-faster-whisper>=1.0
-# Optional generation backends (only if you use them; see src/lmcgen/{lyria,suno}.py):
-# google-genai>=1.0    # Lyria 3 (Google) — needs GEMINI_API_KEY
-# (Suno uses a third-party REST provider via `requests`, already installed.)
-
-# ── SVS arm (lmcsvs): score generation for singing-voice synthesis ──────────────
-# pyphen = accurate, dependency-free syllabification (a naive fallback runs without it).
-# mido is optional (only if LMCSVS_MIDI=1 to also emit .mid alongside MusicXML).
-# The MusicXML scores are rendered to vocals in Synthesizer V Studio 2 Pro / ACE Studio.
-pyphen>=0.14
-# mido>=1.3            # optional: MIDI export
-# g2p_en>=2.1          # optional: ARPABET phonemes for the headless DiffSinger .ds export
-#                      #   (a crude fallback runs without it; install for real renders)
-# DiffSinger itself (OpenVPI) is installed separately in its OWN env with a voicebank —
-# lmcsvs.diffsinger shells out to it; it is NOT a pip dependency here.
+# ── Generative arm (lmcgen): Lyria 3 backend + validation ───────────────────────
+# Songs are generated with Google Lyria 3 Clip via the Gemini API (needs GEMINI_API_KEY
+# in notebooks/.env). Validation: faster-whisper (CTranslate2, CPU/int8, no torch)
+# transcribes clips to score lyric word error rate; MuLan/CLAP (from the observational
+# arm) + librosa acoustic VA place the songs in valence/arousal space; pyloudnorm
+# normalises the exported survey stimuli.
+google-genai>=1.0        # Lyria 3 (Google) — needs GEMINI_API_KEY
+faster-whisper>=1.0      # lyric word-error-rate screening
+pyloudnorm>=0.1          # loudness-normalise exported survey stimuli (~-14 LUFS)
 
 # ── Notebook / utilities ───────────────────────────────────────────────
 jupyter>=1.0
 tqdm>=4.66
+python-dotenv>=1.0   # loads notebooks/.env (API keys) into os.environ — see notebook setup cells
