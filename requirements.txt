@@ -60,3 +60,6 @@ pyloudnorm>=0.1          # loudness-normalise exported survey stimuli (~-14 LUFS
 jupyter>=1.0
 tqdm>=4.66
 python-dotenv>=1.0   # loads notebooks/.env (API keys) into os.environ — see notebook setup cells
+
+# ── Dev / tests ─────────────────────────────────────────────────────────
+pytest>=7.0           # tests/ (currently: scheduler window/toggle logic)

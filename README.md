@@ -71,7 +71,11 @@ popularity) is cached and never recomputed.
 │   ├── embeddings.py         MuLan + CLAP (laion_clap) + MERT encoders
 │   ├── alignment.py          LMC: song / line-windows / chorus vs non-chorus
 │   ├── combine.py            → master_results.csv (+ MERT PCA, ensemble genre)
-│   └── utils.py              device, LRC parsing, cosine, embedding I/O
+│   ├── utils.py              device, LRC parsing, cosine, embedding I/O
+│   ├── gather.py             steps 1-4 as one batched call (run_batch)
+│   └── scheduler.py          on/off + hours-window loop around gather.run_batch
+├── scripts/auto_gather.py    CLI: enable/disable/set-hours/run the scheduler
+├── tests/test_scheduler.py   unit tests for the scheduler's window/toggle logic
 ├── notebooks/pipeline.ipynb  resumable end-to-end driver
 ├── analysis/
 │   ├── summary_stats.R       quick descriptives + figures
@@ -165,6 +169,38 @@ db.progress_report()       # how far each stage has gotten
 ```
 
 Stop and rerun any time — each stage processes only what is still outstanding.
+
+### Auto-gathering on a schedule
+
+`scripts/auto_gather.py` drives steps 1-4 above (sample → audio → popularity →
+mood/MERT/chorus) with a single command, in batches of 100 new songs, and can
+be left running so it keeps gathering during a daily hours window as long as
+the device is on. It is **off by default** — it does nothing until you `enable`
+it.
+
+```bash
+python scripts/auto_gather.py status              # show the toggle + window
+python scripts/auto_gather.py enable               # turn scheduled gathering on
+python scripts/auto_gather.py disable              # turn it back off
+python scripts/auto_gather.py set-hours 1 6        # only gather 1am-6am local time
+python scripts/auto_gather.py run                  # leave this running (Ctrl-C to stop)
+python scripts/auto_gather.py run --once           # run a single batch right now, for testing
+```
+
+The toggle and hours window are saved to `data/scheduler_state.json` (gitignored),
+so they persist across `run` invocations. `run` wakes up once a minute, checks
+the toggle and the clock, and runs a 100-song batch whenever both say go —
+back-to-back until the window closes. To have it survive closing the terminal,
+run it under `nohup`/`screen`/`tmux`, e.g.:
+
+```bash
+nohup python scripts/auto_gather.py run > gather.log 2>&1 &
+```
+
+Every stage it calls is already resumable and idempotent (see `db.py`), so
+stopping and restarting `run` — or letting the window close mid-batch — never
+duplicates work. `--batch-size` and `--poll-seconds` on `run` override the
+defaults (100 songs, 60s) if you want a different cadence.
 
 ### Statistics & modeling
 
